@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+artifacts/
+*.dd
+*.img
+*.raw
+*.vhd
+*.vhdx
+*.dd.bz2
+.DS_Store
+.env
+.env.*
+!.env.example

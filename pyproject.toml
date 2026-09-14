@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-recovery-core"
+version = "0.2.0"
+description = "Local NTFS desktop recovery with safe exports and reproducible verification"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/xiaomengsuifeng/data-recovery"
+Issues = "https://github.com/xiaomengsuifeng/data-recovery/issues"
+Releases = "https://github.com/xiaomengsuifeng/data-recovery/releases"
+
+[project.optional-dependencies]
+desktop = ["PySide6-Essentials==6.8.3"]
+audit = ["pefile==2024.8.26"]
+
+[project.scripts]
+recovery = "recovery_core.cli:main"
+recovery-desktop = "recovery_desktop.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

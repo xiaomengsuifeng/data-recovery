@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "target": "Windows 11 x64",
+  "version": "0.2.0",
+  "archives": [
+    {
+      "filename": "python-3.13.12-embed-amd64.zip",
+      "size": 10941233,
+      "sha256": "76f238f606250c87c6beac75dccd35ee99070a13490555936abb6cb64ecce3d0",
+      "url": "https://www.python.org/ftp/python/3.13.12/python-3.13.12-embed-amd64.zip",
+      "target": "runtime",
+      "provenance": "Official python.org download, SHA-256 recorded over the downloaded artifact."
+    },
+    {
+      "filename": "PySide6_Essentials-6.8.3-cp39-abi3-win_amd64.whl",
+      "size": 72191029,
+      "sha256": "3c0fae5550aff69f2166f46476c36e0ef56ce73d84829eac4559770b0c034b07",
+      "url": "https://files.pythonhosted.org/packages/8e/0f/5d8c6da7586e57ee032643e0c0e62335ef1a1add1a980160ddd1654f1d8d/PySide6_Essentials-6.8.3-cp39-abi3-win_amd64.whl",
+      "target": "runtime/Lib/site-packages",
+      "provenance": "Verified against PyPI release JSON SHA-256.",
+      "include": [
+        "PySide6/__init__.py",
+        "PySide6/_*.py",
+        "PySide6/support/*",
+        "PySide6/py.typed",
+        "PySide6/QtCore.*",
+        "PySide6/QtGui.*",
+        "PySide6/QtWidgets.*",
+        "PySide6/Qt6Core.dll",
+        "PySide6/Qt6Gui.dll",
+        "PySide6/Qt6Widgets.dll",
+        "PySide6/pyside6.abi3.dll",
+        "PySide6/msvcp*.dll",
+        "PySide6/vcruntime*.dll",
+        "PySide6/concrt140.dll",
+        "PySide6/plugins/platforms/qwindows.dll",
+        "PySide6/plugins/platforms/qoffscreen.dll",
+        "PySide6/plugins/imageformats/qgif.dll",
+        "PySide6/plugins/imageformats/qico.dll",
+        "PySide6/plugins/imageformats/qjpeg.dll",
+        "PySide6/plugins/imageformats/qtiff.dll",
+        "PySide6/plugins/imageformats/qwebp.dll",
+        "PySide6/plugins/styles/qmodernwindowsstyle.dll",
+        "PySide6_Essentials-6.8.3.dist-info/*"
+      ]
+    },
+    {
+      "filename": "shiboken6-6.8.3-cp39-abi3-win_amd64.whl",
+      "size": 1150998,
+      "sha256": "bca3a94513ce9242f7d4bbdca902072a1631888e0aa3a8711a52cc5dbe93588f",
+      "url": "https://files.pythonhosted.org/packages/aa/29/e77f3fba5337f2d98f977eece0fd24cda6cf7d83be2699514d2ca1d34f6c/shiboken6-6.8.3-cp39-abi3-win_amd64.whl",
+      "target": "runtime/Lib/site-packages",
+      "provenance": "Verified against PyPI release JSON SHA-256."
+    },
+    {
+      "filename": "sleuthkit-4.15.0-win32.zip",
+      "size": 17728689,
+      "sha256": "c2ebab8105b893d97bd8ce35b88e01985e2a106efc97f03adf95840a631b20ce",
+      "url": "https://github.com/sleuthkit/sleuthkit/releases/download/sleuthkit-4.15.0/sleuthkit-4.15.0-win32.zip",
+      "target": "vendor/tsk",
+      "prefix": "sleuthkit-4.15.0-win32/",
+      "provenance": "Verified against official GitHub asset 397078712 SHA-256. Separate x86 CLI processes under Windows x64."
+    },
+    {
+      "filename": "qtbase-everywhere-src-6.8.3.tar.xz",
+      "size": 48426536,
+      "sha256": "56001b905601bb9023d399f3ba780d7fa940f3e4861e496a7c490331f49e0b80",
+      "url": "https://download.qt.io/archive/qt/6.8/6.8.3/submodules/qtbase-everywhere-src-6.8.3.tar.xz",
+      "target": "sources",
+      "mode": "source",
+      "provenance": "Official Qt source release archive, SHA-256 recorded over downloaded artifact."
+    },
+    {
+      "filename": "qtimageformats-everywhere-src-6.8.3.tar.xz",
+      "size": 2035140,
+      "sha256": "049bfb99845e4801672aca07c3c4fc4c140f932a3a33faa899419579e33ef1c8",
+      "url": "https://download.qt.io/archive/qt/6.8/6.8.3/submodules/qtimageformats-everywhere-src-6.8.3.tar.xz",
+      "target": "sources",
+      "mode": "source",
+      "provenance": "Official Qt source release archive, SHA-256 recorded over downloaded artifact."
+    },
+    {
+      "filename": "pyside-setup-everywhere-src-6.8.3.tar.xz",
+      "size": 16611768,
+      "sha256": "d2c896f7f1a6a7ea4c9f98cfe317272fd139703ddf612b86999f09e48aeef0e6",
+      "url": "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.8.3-src/pyside-setup-everywhere-src-6.8.3.tar.xz",
+      "target": "sources",
+      "mode": "source",
+      "provenance": "Official Qt source release archive, SHA-256 recorded over downloaded artifact."
+    },
+    {
+      "filename": "sleuthkit-4.15.0.tar.gz",
+      "size": 4951534,
+      "sha256": "3a8c1e7d18a9b81f3e5e8aa78313974aceaafc6e051d636bc92cd7168286eca9",
+      "url": "https://github.com/sleuthkit/sleuthkit/releases/download/sleuthkit-4.15.0/sleuthkit-4.15.0.tar.gz",
+      "target": "sources",
+      "mode": "source",
+      "provenance": "Verified against official GitHub asset 397078740 SHA-256."
+    }
+  ]
+}
