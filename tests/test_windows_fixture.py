@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -166,6 +167,53 @@ catch { $rejected = $true }
 """, function="Assert-SamplePath")
         self.assertTrue(result["accepted"])
         self.assertTrue(result["outside_rejected"])
+
+    def test_remount_assigns_nul_drive_letter_but_keeps_an_existing_letter(self):
+        result = self.run_writer(r"""
+$fixtureVhd = 'C:\synthetic-test.vhd'
+$fixtureRoot = 'Z:\'
+$fixtureLetter = 'Z'
+function Assert-OwnedVhd {}
+function Mount-DiskImage { param($ImagePath, $Access, [switch]$PassThru, $ErrorAction) }
+function Get-OwnedDisk { [pscustomobject]@{ Number = 7 } }
+function Get-Partition { param($DiskNumber) [pscustomobject]@{ DriveLetter = $script:letter } }
+function Get-PSDrive { param($Name, $ErrorAction) }
+function Add-PartitionAccessPath {
+    [CmdletBinding()] param([Parameter(ValueFromPipeline)] $InputObject, [string] $AccessPath)
+    process { $script:assigned = $AccessPath }
+}
+function Assert-OwnedVolume { param([switch]$RequireMarker) if (-not $RequireMarker) { throw 'Marker check missing.' } }
+$script:letter = [char]0
+$script:assigned = $null
+Mount-OwnedFixture
+$nulAssigned = $script:assigned
+$script:letter = [char]'Z'
+$script:assigned = $null
+Mount-OwnedFixture
+@{ nul_assigned = $nulAssigned; existing_assigned = $script:assigned } | ConvertTo-Json
+""", function="Mount-OwnedFixture")
+        self.assertEqual(result["nul_assigned"], "Z:\\")
+        self.assertIsNone(result["existing_assigned"])
+
+    def test_live_validation_preserves_native_stderr_before_reporting_exit(self):
+        self.generator = self.generator.with_name("Invoke-LiveVolumeValidation.ps1")
+        result = self.run_writer(r"""
+$run = $testRoot
+$Python = PYTHON
+$program = Join-Path $testRoot 'failure.py'
+[IO.File]::WriteAllText($program, "import sys`nsys.stderr.write('first error\nlast error\n')`nraise SystemExit(7)")
+$message = ''
+try { Invoke-CheckedPython 'failed' @('-X', 'utf8', '-B', $program) } catch { $message = $_.Exception.Message }
+$failed = [IO.File]::ReadAllText((Join-Path $testRoot 'failed.log'))
+[IO.File]::WriteAllText($program, "import sys`nsys.stderr.write('diagnostic\n')`nprint('completed')")
+Invoke-CheckedPython 'success' @('-X', 'utf8', '-B', $program)
+@{ message = $message; failed = $failed; success = [IO.File]::ReadAllText((Join-Path $testRoot 'success.log')) } | ConvertTo-Json
+""".replace("PYTHON", "'" + sys.executable.replace("'", "''") + "'"), function="Invoke-CheckedPython")
+        self.assertIn("exited with 7", result["message"])
+        self.assertIn("first error", result["failed"])
+        self.assertIn("last error", result["failed"])
+        self.assertIn("diagnostic", result["success"])
+        self.assertIn("completed", result["success"])
 
 
 if __name__ == "__main__":

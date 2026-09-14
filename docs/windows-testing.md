@@ -179,6 +179,18 @@ python -m recovery_core verify /path/to/recovered/direct-01 --manifest /path/to/
 
 然后对 `after-empty-recycle-bin.img` 使用新的 session 和 destination，以及它自己的 manifest。内容原样一致、原文件名正确、原目录正确、错误 `$I/$R` 关联分别评估；仅输出 `$R...` 名称不能算原名恢复。流程成功退出也不能替代逐目标内容校验。
 
+## 验收“选择磁盘”直接扫描
+
+`Invoke-LiveVolumeValidation.ps1` 对已完成的合成样本进行另一类检查：将选定阶段复制为新 fixed VHD，以只读方式挂载副本，再用原生 Qt 的磁盘入口扫描、预览、保存和重开。不会格式化或删除样本，也不接受已有磁盘号/盘符。
+
+```powershell
+.\tools\windows\Invoke-LiveVolumeValidation.ps1 -Fixture C:\RecoveryFixtures\ntfs-fixture-ID -OutputParent D:\Validation -Stage after-direct-delete -TskBin C:\Tools\tsk\bin
+```
+
+需在管理员 PowerShell 运行，两个路径均替换为实际存在的目录。`-Stage` 还可选 `after-empty-recycle-bin`。便携包中入口是 `.\validation\Invoke-LiveVolumeValidation.ps1`，可省略 Python 和 TSK 参数。
+
+工具核对直接卷与 raw 镜像候选/导出的对应关系，并按独立原件统计恢复结果；同盘扫描、同盘导出及卸载后访问必须被拒绝。最后卸载副本，复核输入和副本摘要、已有磁盘和分区清单。`workflow.json` 的 `passed` 表示这些流程一致，不等于删除目标全部恢复。[证据、结果和仍需验证的物理介质范围](milestones/09-live-volume-validation.md)
+
 ## 失败时如何处理
 
 脚本出错会保留已有材料和 `status: failed`，并尝试只卸载本轮 VHD。不要执行“清空回收站”桌面菜单来补做步骤，也不要修改脚本把根路径改成空字符串。

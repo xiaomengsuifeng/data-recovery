@@ -291,7 +291,9 @@ function Mount-OwnedFixture {
     $script:fixtureDiskNumber = [int]$disk.Number
     $parts = @(Get-Partition -DiskNumber $disk.Number)
     if ($parts.Count -ne 1) { throw 'Unexpected partition count after reattach.' }
-    if (-not [string]$parts[0].DriveLetter) {
+    # Storage can return a NUL Char for an unassigned letter; its string is
+    # nonempty. Check for an actual drive letter before skipping assignment.
+    if ([string]$parts[0].DriveLetter -notmatch '^[A-Za-z]$') {
         if (Get-PSDrive -Name $fixtureLetter -ErrorAction SilentlyContinue) { throw 'Test drive letter was taken.' }
         $null = $parts[0] | Add-PartitionAccessPath -AccessPath $fixtureRoot -ErrorAction Stop
     }

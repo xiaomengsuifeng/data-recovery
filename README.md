@@ -32,11 +32,13 @@ PYTHONPATH=src QT_QPA_PLATFORM=offscreen .venv/bin/python -B -m unittest discove
 
 [开发命令、报告格式、可复现演示和 Windows 打包](docs/development.md)。Windows 包由固定上游归档离线组装，`tools/runtime-lock.json` 锁定下载地址、长度、SHA-256 和实际选用模块；包内附有对应开源组件源码与许可。
 
-当前自动测试共 212 项，管理员环境全部通过、无跳过，包含扩展样本验收、旧日志、片段、内容扫描、Qt 和符号链接用例。NIST DFR-01 镜像另用于原生 Qt 和真实 TSK 的桌面回归，其参考摘要来自删除后镜像的文档指定区域。[NIST 样本证据说明](tests/integration/fixture-source.md)
+当前自动测试共 221 项，管理员环境全部通过、无跳过，包含直接卷验收工具、扩展样本、旧日志、片段、内容扫描、Qt 和符号链接用例。NIST DFR-01 镜像另用于原生 Qt 和真实 TSK 的桌面回归，其参考摘要来自删除后镜像的文档指定区域。[NIST 样本证据说明](tests/integration/fixture-source.md)
 
 隔离样本已保存 9 个删除前原件并生成四阶段镜像。同时启用 PNG 和旧日志扫描后，阶段内容匹配为 0/0、4/4、2/4、6/8，原路径匹配为 0、4、2、6。另导出 1 份文字片段，不计入完整恢复；仍有 2 个 TXT 未完整恢复，整轮保持 `incomplete`。另一独立生成的同类 Windows 样本得到相同计数。[使用方法](docs/windows-testing.md) · [验收报告](docs/milestones/07-ntfs-log-recovery.md)
 
 另完成两组随机内容和长路径的扩展样本，每组 34 个删除目标。清空回收站后内容及原路径均为 28/34；追加 4 MiB 或 32 MiB 写入后均仅剩 2/34 的 PNG 内容，原路径未知。新增五阶段自动验收及按场景、大小统计，未启用缺乏正文证据的驻留日志恢复。[最新扩展验收](docs/milestones/08-expanded-fixture-validation.md)
+
+已新增只读虚拟卷的直接扫描验收入口，实际验证桌面选择卷、预览、保存和重开，同盘输出及卷卸载后的访问会被拒绝。直接删除样本内容与路径均为 4/4，与同一 raw 镜像一致；输入和副本摘要未变。[最新直接卷验收](docs/milestones/09-live-volume-validation.md)
 
 ## 当前边界
 
@@ -45,7 +47,7 @@ PYTHONPATH=src QT_QPA_PLATFORM=offscreen .venv/bin/python -B -m unittest discove
 - 镜像可选旧 NTFS 日志恢复，支持部分日志格式中的非驻留数据及复用记录；片段单独标记、保存和统计，历史名称与内容仍需核对。
 - 暂无 FAT/exFAT/APFS、其他格式或碎片文件的内容扫描、BitLocker/EFS 解密、坏盘采集、断点续扫和 TRIM 逆转。
 - 镜像模式在关键操作前后比较完整 SHA-256；真实卷只能核对设备身份，Windows 可能继续改变卷内容。
-- 清空回收站及删除后追加写入已完成小型隔离 VHD 实测；更多分配布局、物理介质、应用 UAC 取消、原始设备访问及不同 DPI 仍需验证。
+- 清空回收站、追加写入和只读虚拟卷的直接访问已完成隔离 VHD 实测；更多分配布局、可写物理介质、应用 UAC 取消、读取中断连及不同 DPI 仍需验证。
 
 ## 产品与调研
 

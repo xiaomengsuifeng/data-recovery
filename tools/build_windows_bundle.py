@@ -83,6 +83,8 @@ def build(cache: Path, output: Path) -> Path:
     (output/'validation').mkdir()
     shutil.copy2(ROOT/'tools/windows/New-RecoveryFixture.ps1',output/'validation/New-RecoveryFixture.ps1')
     shutil.copy2(ROOT/'tools/windows/Invoke-RecoveryValidation.ps1',output/'validation/Invoke-RecoveryValidation.ps1')
+    shutil.copy2(ROOT/'tools/windows/Invoke-LiveVolumeValidation.ps1',output/'validation/Invoke-LiveVolumeValidation.ps1')
+    shutil.copy2(ROOT/'tools/live_volume_validation.py',output/'validation/live_volume_validation.py')
     shutil.copy2(ROOT/'docs/windows-testing.md',output/'validation/windows-testing.md')
     (output/'Start-ShiHui.cmd').write_bytes(b'@echo off\r\nstart "" /D "%~dp0" "%~dp0runtime\\pythonw.exe" -B "%~dp0launch.pyw"\r\n')
     (output/'Create-Desktop-Shortcut.cmd').write_bytes(b'@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-Shortcut.ps1"\r\npause\r\n')
