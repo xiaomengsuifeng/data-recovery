@@ -61,7 +61,11 @@ def new_directory(path: Path) -> Path:
     parent = path.absolute().parent.resolve(strict=True)
     target = parent / path.name
     try:
-        target.mkdir(mode=0o700)
+        if os.name == "nt":
+            from .windows_output import create_private_directory
+            create_private_directory(target)
+        else:
+            target.mkdir(mode=0o700)
     except FileExistsError as exc:
         raise RecoveryError(f"Output must be a new directory: {target}") from exc
     return target

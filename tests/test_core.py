@@ -122,12 +122,26 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "source_changed")
         self.assertEqual(read_json(self.destination / "recovery.json")["status"], "source_changed")
 
-    def test_existing_destination_and_symlink_are_not_reused(self):
+    def test_existing_destination_is_not_reused(self):
+        self.start()
+        self.destination.mkdir()
+        keep = self.destination / "keep"
+        keep.write_bytes(b"original")
+        with self.assertRaises(RecoveryError):
+            recover(self.session, self.destination, backend=self.backend)
+        self.assertEqual(keep.read_bytes(), b"original")
+
+    def test_destination_symlink_is_not_reused(self):
         self.start()
         outside = self.root / "outside"
         outside.mkdir()
         (outside / "keep").write_bytes(b"original")
-        self.destination.symlink_to(outside, target_is_directory=True)
+        try:
+            self.destination.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows symbolic links require Developer Mode or the symlink privilege")
+            raise
         with self.assertRaises(RecoveryError):
             recover(self.session, self.destination, backend=self.backend)
         self.assertEqual((outside / "keep").read_bytes(), b"original")

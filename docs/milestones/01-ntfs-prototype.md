@@ -2,6 +2,8 @@
 
 验收日期：2026-09-12。当前完成的是可运行、可复现的命令行恢复流程；Windows 桌面产品仍在开发范围内。
 
+本文保留当时的历史记录；后续进展见 [0.2.0 桌面测试版](02-desktop-test-release.md)和 [Windows 镜像流程验证](03-windows-image-validation.md)。
+
 ## 已实现
 
 - 只读 NTFS raw 镜像扫描，记录源镜像摘要、分区偏移、底层版本和候选证据。
@@ -28,7 +30,7 @@
 
 镜像 SHA-256：`c863ccad01804b840a6dfa623a94996ca876e15ded41c6c0d8ae148620eb6493`。
 
-本机保留了[演示验证报告](../../artifacts/nist-demo-01/verification.json)、[CLI 扫描会话](../../artifacts/cli-scan-01/session.json)、[CLI 导出报告](../../artifacts/cli-recovered-01/recovery.json)和[CLI 校验报告](../../artifacts/cli-verification-01.json)。`artifacts/` 为本地可重建输出，不加入源码版本管理；其他电脑可使用 `tools/run_nist_demo.py` 重建自己的报告。完整数据来源见[样本记录](../../tests/integration/fixture-source.md)。
+当时开发机本地保留了 `artifacts/nist-demo-01/verification.json`、`artifacts/cli-scan-01/session.json`、`artifacts/cli-recovered-01/recovery.json` 和 `artifacts/cli-verification-01.json`。这些历史证据不随仓库分发；`artifacts/` 为本地可重建输出，不加入源码版本管理。其他电脑可使用 `tools/run_nist_demo.py` 重建自己的报告。完整数据来源见[样本记录](../../tests/integration/fixture-source.md)。
 
 测试环境：macOS x86_64、Python 3.12.4、TSK 4.15.0。本次临时工具目录为 `/tmp/data-recovery-tsk/bin`，没有把依赖安装到系统 PATH；清理临时目录后需重新准备 TSK。
 

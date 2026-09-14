@@ -218,6 +218,9 @@ def verify(recovery_dir: Path, manifest_path: Path) -> dict:
         output.update(status="read_verified", actual_size=after.st_size, actual_sha256=digest,
                       report_size_matches=(None if item.get("actual_size") is None else item["actual_size"] == after.st_size),
                       report_hash_matches=(None if item.get("sha256") is None else item["sha256"].lower() == digest))
+        if item.get("content_status") == "fragment":
+            output["excluded_reason"] = "known_fragment"
+            continue
         usable.append({**output, "original_path": item.get("original_path"),
                        "path_key": _path_key(item.get("original_path"))})
 

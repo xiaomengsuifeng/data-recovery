@@ -65,10 +65,22 @@ class CandidateModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             path = item.get("original_path")
             evidence = "原名待确认" if not path else ("回收站记录" if "recycle_metadata" in item.get("path_evidence", "") else "文件记录")
-            values = ("", filename(item), category(item), format_size(item["size"]),
+            if item.get("recovery_method") == "png_carving":
+                evidence = "深度扫描·生成名称"
+            display_name = filename(item)
+            if item.get("recovery_method") == "ntfs_log":
+                evidence = "旧日志·历史名称" if path else "旧日志·原目录未知"
+                if item.get("content_status") == "fragment":
+                    evidence = "旧日志·不完整片段"
+                    display_name += "（片段）"
+            values = ("", display_name, category(item), format_size(item["size"]),
                       str(PureWindowsPath(path).parent) if path else "原目录未知", evidence)
             return values[column]
         if role == Qt.ItemDataRole.ToolTipRole:
+            if item.get("recovery_method") == "ntfs_log":
+                return (item.get("original_path") or item["observed_path"]) + "\n" + "\n".join(item.get("warnings", []))
+            if item.get("recovery_method") == "png_carving":
+                return "PNG 内容扫描：显示名称由程序生成，原名与目录未知。\n块结构与 CRC 通过，仍需预览和保存后检查。"
             return (item.get("original_path") or item["observed_path"]) + "\n文件内容需通过预览或保存后检查。"
         if role == Qt.ItemDataRole.ForegroundRole and column == 5:
             return QColor("#9b681a" if not item.get("original_path") else "#18786c")

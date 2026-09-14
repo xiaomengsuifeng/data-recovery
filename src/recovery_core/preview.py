@@ -7,7 +7,7 @@ import zipfile
 from xml.etree import ElementTree
 
 from .common import RecoveryError, check_identity, read_json
-from .service import _validate_candidates
+from .service import _validate_candidates, extract_candidate
 from .windows import ensure_safe_locations
 
 MAX_PREVIEW_BYTES = 32 * 1024 * 1024
@@ -77,11 +77,19 @@ def preview(session: Path, candidate_id: str, backend) -> dict:
     check_identity(report["source"])
     ensure_safe_locations(report["source"], session)
     with io.BytesIO() as output:
-        backend.extract(Path(report["source"]["path"]), report["offset"], report["sector_size"],
-                        item["inode"], output, item["size"])
+        extract_candidate(Path(report["source"]["path"]), report["offset"], report["sector_size"],
+                          item, output, backend=backend)
         data = output.getvalue()
     check_identity(report["source"])
     result = describe(data, item["original_path"] or item["observed_path"])
+    if item.get("recovery_method") == "png_carving":
+        result["note"] = "深度扫描生成名称，原名与目录未知。 " + result["note"]
+    if item.get("recovery_method") == "ntfs_log":
+        result["note"] = "旧日志关联的历史文件，内容仍需核对。 " + result["note"]
+        if item["content_status"] == "fragment":
+            info = item["ntfs_log"]
+            result["note"] = (f"不完整片段：原文件 {info['original_size']} 字节，从字节 {info['file_offset']} 开始，"
+                              f"本片段 {item['size']} 字节。 " + result["note"])
     result.update(candidate_id=candidate_id, size=len(data), expected_size=item["size"])
     if len(data) != item["size"]:
         result["note"] = "读取长度与记录不同，内容可能不完整。 " + result["note"]

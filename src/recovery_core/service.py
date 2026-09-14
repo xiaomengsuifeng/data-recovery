@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import tempfile
 from collections import defaultdict
@@ -8,6 +9,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import __version__
+from . import carving, ntfs_log
 from .common import (RecoveryError, check_identity, image_identity, new_directory,
                      read_json, regular_file, sha256_file, write_json)
 from .recycle_bin import InvalidRecycleMetadata, pair_key, parse_dollar_i
@@ -83,9 +85,18 @@ def _associate_recycle(candidates: list[dict], backend: Tsk, image: Path,
 
 
 def scan(image: Path | VolumeSource, output: Path, *, backend: Tsk, offset: int = 0,
-         sector_size: int = 512, max_candidates: int = 10000) -> dict:
+         sector_size: int = 512, max_candidates: int = 10000, deep_png: bool = False,
+         deep_log: bool = False) -> dict:
     if type(max_candidates) is not int or not 1 <= max_candidates <= 100000:
         raise RecoveryError("--max-candidates must be between 1 and 100000 for this prototype.")
+    if type(deep_png) is not bool:
+        raise RecoveryError("Invalid PNG deep-scan option.")
+    if type(deep_log) is not bool:
+        raise RecoveryError("Invalid NTFS log scan option.")
+    if deep_log and isinstance(image, VolumeSource):
+        raise RecoveryError("旧日志恢复目前仅支持 NTFS 镜像文件。")
+    if deep_png and isinstance(image, VolumeSource):
+        raise RecoveryError("PNG 深度扫描目前仅支持镜像文件，请先使用 NTFS 镜像。")
     if isinstance(image, VolumeSource):
         identity = volume_identity(image.mount)
         ensure_safe_locations(identity, output)
@@ -113,6 +124,25 @@ def scan(image: Path | VolumeSource, output: Path, *, backend: Tsk, offset: int 
             candidate["warnings"].append("Observed system/recovery path does not establish the original directory.")
     progress("recycle", message="关联回收站名称与内容")
     _associate_recycle(candidates, backend, image, offset, sector_size, directory)
+    carving_report = None
+    if deep_png:
+        carved, carving_report = carving.scan_png(image, offset, sector_size, backend=backend,
+                                                  max_candidates=max_candidates - len(candidates))
+        for candidate in carved:
+            candidate["id"] = _candidate_id(f"png:{candidate['carving']['image_offset']}", candidate["observed_path"])
+        candidates.extend(carved)
+        warnings.append("PNG 深度扫描结果原名与目录未知，可能与文件记录结果重复；仅支持未分配空间中的连续静态 PNG，最大 256 MiB。")
+    log_report = None
+    if deep_log:
+        historical, log_report = ntfs_log.scan_log(image, offset, sector_size, backend=backend,
+                                                  max_candidates=max_candidates - len(candidates))
+        for candidate in historical:
+            info = candidate["ntfs_log"]
+            candidate["id"] = _candidate_id(
+                f"log:{info['record']}:{info['sequence']}:{info['initialization_lsn']}:{info['file_offset']}",
+                candidate["observed_path"])
+        candidates.extend(historical)
+        warnings.append("旧日志恢复仅支持部分 NTFS 日志格式；历史名称和内容需核对，有缺口的数据单独标为片段。")
     progress("source", message="复核扫描源")
     check_identity(identity)
     report = {
@@ -120,11 +150,14 @@ def scan(image: Path | VolumeSource, output: Path, *, backend: Tsk, offset: int 
         "source": identity, "offset": offset, "sector_size": sector_size,
         "backend": {"name": "The Sleuth Kit", "versions": backend.versions},
         "candidate_count": len(candidates), "candidates": candidates, "warnings": warnings,
+        "scan_options": {"deep_png": deep_png, "deep_log": deep_log}, "carving": carving_report, "ntfs_log": log_report,
         "limitations": [
-            "Only deleted NTFS unnamed data attributes are supported.",
+            "Metadata recovery supports deleted NTFS unnamed data attributes.",
             "Deleted directories are visited separately; damaged or reused directory records may remain incomplete.",
             "Deleted allocation pointers can reference reused content; export does not prove integrity.",
-            "No carving, EFS/BitLocker decryption, or TRIM reversal is implemented.",
+            "Optional PNG carving checks contiguous unallocated image bytes and chunk CRCs; original names and paths are unknown.",
+            "Optional log evidence recovery reads historical nonresident runs in reused MFT generations; fragments are explicitly partial.",
+            "No fragmented-file carving, other content formats, EFS/BitLocker decryption, or TRIM reversal is implemented.",
         ],
     }
     if identity.get("kind") == "windows_volume":
@@ -167,8 +200,17 @@ def _validate_candidates(candidates) -> None:
         if not isinstance(identifier, str) or not re.fullmatch("[0-9a-f]{24}", identifier) or identifier in ids:
             raise RecoveryError("Invalid or duplicate candidate ID.")
         ids.add(identifier)
-        if not isinstance(candidate.get("inode"), str) or not ATTRIBUTE_ID.fullmatch(candidate["inode"]):
-            raise RecoveryError("Invalid NTFS attribute ID.")
+        method = candidate.get("recovery_method", "ntfs_metadata")
+        if method == "png_carving":
+            carving.validate_candidate(candidate)
+        elif method == "ntfs_log":
+            ntfs_log.validate_candidate(candidate)
+        elif method == "ntfs_metadata":
+            if (not isinstance(candidate.get("inode"), str) or not ATTRIBUTE_ID.fullmatch(candidate["inode"])
+                    or "carving" in candidate or "ntfs_log" in candidate):
+                raise RecoveryError("Invalid NTFS attribute ID or extraction descriptor.")
+        else:
+            raise RecoveryError("Unsupported recovery method.")
         if type(candidate.get("size")) is not int or not 0 <= candidate["size"] < 1 << 63:
             raise RecoveryError("Invalid candidate size.")
         if not isinstance(candidate.get("observed_path"), str) or not candidate["observed_path"]:
@@ -177,6 +219,18 @@ def _validate_candidates(candidates) -> None:
             raise RecoveryError("Invalid original path.")
         if candidate.get("kind") not in ("file", "recycle_metadata"):
             raise RecoveryError("Unsupported candidate kind.")
+
+
+def extract_candidate(image: Path, offset: int, sector_size: int, candidate: dict, output, *, backend) -> None:
+    """One extraction path for preview and export; session descriptors are validated by callers."""
+    if candidate.get("recovery_method") == "png_carving":
+        image = regular_file(image)  # Carving must never read a live device.
+        carving.extract_png(image, offset, sector_size, candidate, output, backend=backend)
+    elif candidate.get("recovery_method") == "ntfs_log":
+        image = regular_file(image)
+        ntfs_log.extract_log(image, offset, sector_size, candidate, output, backend=backend)
+    else:
+        backend.extract(image, offset, sector_size, candidate["inode"], output, candidate["size"])
 
 
 def recover(session: Path, destination: Path, *, backend: Tsk,
@@ -216,9 +270,15 @@ def recover(session: Path, destination: Path, *, backend: Tsk,
         result = {
             "candidate_id": candidate["id"], "original_path": candidate["original_path"],
             "observed_path": candidate["observed_path"], "expected_size": candidate["size"],
+            "recovery_method": candidate.get("recovery_method", "ntfs_metadata"),
+            "path_evidence": candidate.get("path_evidence"),
             "actual_size": 0, "sha256": None, "saved_path": None,
             "status": "skipped", "warnings": list(candidate.get("warnings", [])),
         }
+        if candidate.get("recovery_method") == "ntfs_log":
+            result.update(content_status=candidate["content_status"],
+                          original_size=candidate["ntfs_log"]["original_size"],
+                          file_offset=candidate["ntfs_log"]["file_offset"])
         results.append(result)
         if candidate["size"] > max_file_bytes:
             result["warnings"].append("File exceeds --max-file-bytes; it was not extracted.")
@@ -230,6 +290,9 @@ def recover(session: Path, destination: Path, *, backend: Tsk,
             continue
         relative = Path("files") / safe_relative_path(
             candidate["original_path"] or candidate["observed_path"])
+        fragment = candidate.get("recovery_method") == "ntfs_log" and candidate["content_status"] == "fragment"
+        if fragment:
+            relative = relative.with_name(relative.stem + f".fragment-{candidate['ntfs_log']['file_offset']:08x}" + relative.suffix)
         original_relative = relative
         collision = 0
         while relative.as_posix().casefold() in saved_names:
@@ -241,11 +304,12 @@ def recover(session: Path, destination: Path, *, backend: Tsk,
         try:
             progress("export", len(results) - 1, len(candidates), candidate["original_path"] or candidate["observed_path"])
             try:
-                target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+                # Inherit the private output-root ACL on Windows. mode=0o700
+                # would replace the explicit user grant with OWNER RIGHTS.
+                target.parent.mkdir(parents=True, mode=0o777 if os.name == "nt" else 0o700, exist_ok=True)
                 with target.open("xb") as stream:
-                    backend.extract(image, offset, sector_size, candidate["inode"], stream,
-                                    candidate["size"])
-                result["status"] = "exported_unverified"
+                    extract_candidate(image, offset, sector_size, candidate, stream, backend=backend)
+                result["status"] = "partial" if fragment else "exported_unverified"
             except (RecoveryError, OSError) as exc:
                 result["warnings"].append(str(exc))
                 result["status"] = "partial" if target.is_file() else "failed"

@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import platform
 import sys
 import time
 
@@ -91,7 +92,10 @@ def main():
     app.processEvents()
     summary = {"output": str(output), "session": str(session), "recovered": str(window.last_output),
                "candidate_count": report["candidate_count"], "reference_extent_match": result["all_targets_verified"],
-               "desktop_host": sys.platform, "windows_execution_verified": False}
+               "desktop_host": sys.platform, "host_platform": platform.platform(),
+               "qt_platform": app.platformName(),
+               "windows_image_workflow_verified": sys.platform == "win32" and result["all_targets_verified"],
+               "windows_execution_verified": False}
     write_json(output / "desktop-demo.json", dict(schema_version=1, **summary))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if result["all_targets_verified"] else 1

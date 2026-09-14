@@ -197,6 +197,12 @@ class RecoveryWindow(QMainWindow):
         self.partition = QComboBox()
         self.partition.addItem("选择来源后，自动识别 NTFS 分区", None)
         c.addWidget(self.partition)
+        self.deep_png = QCheckBox("深度查找 PNG 图片（较慢，原名与目录未知，仅镜像）")
+        self.deep_png.setToolTip("额外检查未分配空间中的连续 PNG，最大 256 MiB。可能与普通结果重复。")
+        c.addWidget(self.deep_png)
+        self.deep_log = QCheckBox("查找旧日志中的文件（实验功能，仅镜像，片段会单独标记）")
+        self.deep_log.setToolTip("利用旧 NTFS 文件记录查找数据。仅支持部分日志格式；历史名称和内容仍需核对。")
+        c.addWidget(self.deep_log)
         c.addWidget(label("2  选择工作与保存位置", "title"))
         row = QHBoxLayout()
         self.workspace = QLineEdit()
@@ -224,7 +230,15 @@ class RecoveryWindow(QMainWindow):
         t.addWidget(label("优先查找文档与照片。找到文件后可先预览，再选择需要保存的内容。\n请将恢复结果保存到其他磁盘，避免覆盖仍可恢复的数据。", "muted", True))
         v.addWidget(tips)
         v.addStretch()
-        self.pages.addWidget(page)
+        for control in (self.mode, self.source_edit, self.source_button, self.partition,
+                        self.workspace, self.workspace_button, self.admin_button, self.scan_button):
+            control.ensurePolished()
+            control.setMinimumHeight(control.sizeHint().height())
+        self.home_scroll = QScrollArea()
+        self.home_scroll.setWidgetResizable(True)
+        self.home_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.home_scroll.setWidget(page)
+        self.pages.addWidget(self.home_scroll)
 
     def _results_page(self):
         page = QWidget()
@@ -289,7 +303,14 @@ class RecoveryWindow(QMainWindow):
         p.addWidget(self.preview_note)
         self.preview_button = button("预览选中文件", self.request_preview)
         p.addWidget(self.preview_button)
-        split.addWidget(preview_frame)
+        # A small window must scroll the preview instead of squeezing the
+        # image and its evidence note into overlapping minimum geometries.
+        preview_scroll = QScrollArea()
+        preview_scroll.setWidgetResizable(True)
+        preview_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        preview_scroll.setMinimumWidth(265)
+        preview_scroll.setWidget(preview_frame)
+        split.addWidget(preview_scroll)
         split.setSizes([650, 290])
         v.addWidget(split, 1)
         self.empty_label = label("没有找到符合条件的文件。尝试更换关键词或类型。", "notice", True)
@@ -357,6 +378,8 @@ class RecoveryWindow(QMainWindow):
                   self.admin_button, self.back_results):
             w.setEnabled(not busy)
         self.cancel_button.setEnabled(busy)
+        self.deep_png.setEnabled(not busy and self.mode.currentIndex() == 0)
+        self.deep_log.setEnabled(not busy and self.mode.currentIndex() == 0)
         if not busy:
             self.update_selection()
 
@@ -371,6 +394,7 @@ class RecoveryWindow(QMainWindow):
 
     def on_progress(self, event):
         names = {"hash": "正在校验文件数据", "source": "正在核对来源", "scan": "正在查找删除记录",
+                 "carving": "正在深度查找 PNG",
                  "directories": "正在查找已删除目录", "recycle": "正在关联回收站记录", "export": "正在保存文件"}
         text = names.get(event["phase"], "正在处理")
         if event.get("message"):
@@ -401,6 +425,11 @@ class RecoveryWindow(QMainWindow):
         self.partition.clear()
         self.partition.addItem("请选择来源", None)
         live = self.mode.currentIndex() == 1
+        if live:
+            self.deep_png.setChecked(False)
+            self.deep_log.setChecked(False)
+        self.deep_png.setEnabled(not live)
+        self.deep_log.setEnabled(not live)
         self.live_notice.setVisible(live)
         self.source_button.setText("刷新磁盘" if live else "选择镜像")
         self.source_edit.setPlaceholderText("选择下方的 NTFS 磁盘" if live else "选择 .img、.dd 或 .raw 镜像")
@@ -452,8 +481,11 @@ class RecoveryWindow(QMainWindow):
         destination = self.new_task_folder(work, "scan")
         offset = choice.get("offset", 0)
         sector = choice.get("sector_size", 512)
+        deep_png = self.deep_png.isChecked()
+        deep_log = self.deep_log.isChecked()
         def operation():
-            return scan(source, destination, backend=self.backend(), offset=offset, sector_size=sector, max_candidates=100000)
+            return scan(source, destination, backend=self.backend(), offset=offset, sector_size=sector,
+                        max_candidates=100000, deep_png=deep_png, deep_log=deep_log)
         def loaded(report):
             self.load_report(destination, report)
             self.task_label.setText("查找完成，请选择需要保存的文件。")

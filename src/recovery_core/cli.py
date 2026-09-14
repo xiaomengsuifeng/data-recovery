@@ -29,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
     scan_parser.add_argument("--offset", type=int, default=0, help="文件系统起始扇区")
     scan_parser.add_argument("--sector-size", type=int, choices=(512, 1024, 2048, 4096), default=512)
     scan_parser.add_argument("--max-candidates", type=positive, default=10000)
+    scan_parser.add_argument("--deep-png", action="store_true", help="额外扫描未分配空间中的连续 PNG；原名与路径未知")
+    scan_parser.add_argument("--deep-log", action="store_true", help="从旧 NTFS 日志恢复复用记录的数据；缺口标为片段，仅部分日志格式")
     recovery_parser = commands.add_parser("recover", help="将候选导出到新目录")
     recovery_parser.add_argument("session", type=Path)
     recovery_parser.add_argument("--destination", type=Path, required=True)
@@ -38,7 +40,12 @@ def main(argv: list[str] | None = None) -> int:
     verify_parser.add_argument("recovery", type=Path, help="包含 recovery.json 的导出目录")
     verify_parser.add_argument("--manifest", type=Path, required=True)
     verify_parser.add_argument("--output", type=Path, help="新的 JSON 报告文件，默认只输出到终端")
-    for child in (doctor, scan_parser, recovery_parser):
+    fixture_parser = commands.add_parser("validate-fixture", help="按隔离样本各阶段的原件清单验收恢复结果")
+    fixture_parser.add_argument("fixture", type=Path, help="New-RecoveryFixture.ps1 生成的完整样本目录")
+    fixture_parser.add_argument("--output", type=Path, required=True, help="样本目录之外的全新验收结果目录")
+    fixture_parser.add_argument("--deep-png", action="store_true", help="每个阶段额外执行 PNG 深度扫描")
+    fixture_parser.add_argument("--deep-log", action="store_true", help="每个阶段额外检查旧 NTFS 日志")
+    for child in (doctor, scan_parser, recovery_parser, fixture_parser):
         child.add_argument("--tsk-bin", type=Path, help="包含 fls 和 icat 的目录")
         child.add_argument("--timeout", type=positive, default=120, help="每个 TSK 子进程的秒数上限")
     args = parser.parse_args(argv)
@@ -55,15 +62,22 @@ def main(argv: list[str] | None = None) -> int:
                           "versions": backend.versions, "input_mode": "raw_image_only"}
             elif args.command == "scan":
                 report = scan(args.image, args.output, backend=backend, offset=args.offset,
-                              sector_size=args.sector_size, max_candidates=args.max_candidates)
+                              sector_size=args.sector_size, max_candidates=args.max_candidates,
+                              deep_png=args.deep_png, deep_log=args.deep_log)
                 result = {"status": report["status"], "candidate_count": report["candidate_count"],
                           "session": str((args.output / "session.json").absolute()),
                           "warnings": report["warnings"]}
+            elif args.command == "validate-fixture":
+                from .fixture_validation import validate_fixture
+                result = validate_fixture(args.fixture, args.output, backend=backend,
+                                          deep_png=args.deep_png, deep_log=args.deep_log)
             else:
                 report = recover(args.session, args.destination, backend=backend,
                                  candidate_ids=args.candidate_ids, max_file_bytes=args.max_file_bytes)
                 result = {k: v for k, v in report.items() if k not in ("source", "results")}
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.command == "validate-fixture":
+            return {"passed": 0, "incomplete": 1, "failed": 2, "cancelled": 130}[result["status"]]
         if result.get("status") == "cancelled":
             return 130
         if result.get("status") == "source_changed":

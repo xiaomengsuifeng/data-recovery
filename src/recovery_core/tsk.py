@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import io
+import locale
 import math
 import queue
 import re
@@ -19,6 +20,13 @@ ATTRIBUTE_ID = re.compile(r"^[0-9]+-128-[0-9]+$")
 REGULAR_BODY_MODE = re.compile(r"^[r-]/r[rwxstST-]{9}$")
 STDERR_LIMIT = 1024 * 1024
 PIPE_CHUNK_BYTES = 64 * 1024
+
+
+def _output_encoding() -> str:
+    # Windows TSK uses setlocale(LC_ALL, "") and wide printf in text mode;
+    # redirected listings use the native ANSI code page, not Python's UTF-8
+    # mode. Unix TSK writes its internal UTF-8 directly. Never guess per record.
+    return locale.getencoding() if os.name == "nt" else "utf-8"
 
 
 def run_bounded(command: list[str], output, *, limit: int, timeout: float) -> None:
@@ -108,7 +116,7 @@ def run_bounded(command: list[str], output, *, limit: int, timeout: float) -> No
                 raise RecoveryError(f"TSK timed out after {timeout:g} seconds.")
             failed.wait(min(0.025, remaining_time))
         # Readers have finished, including the final budget check and pipe close.
-        detail = diagnostic[:8192].decode("utf-8", errors="replace").strip()
+        detail = diagnostic[:8192].decode(_output_encoding(), errors="replace").strip()
         if process.returncode:
             raise RecoveryError(f"TSK exited with {process.returncode}: {detail}")
         if detail:
@@ -183,7 +191,7 @@ class Tsk:
             with io.BytesIO() as output:
                 run_bounded([executable, "-V"], output, limit=4096, timeout=10)
                 output.seek(0)
-                self.versions[name] = output.read().decode("utf-8", errors="strict").strip()
+                self.versions[name] = output.read().decode(_output_encoding(), errors="strict").strip()
         if self.versions["fls"] != self.versions["icat"]:
             raise RecoveryError("fls and icat versions differ; use tools from the same release.")
 
@@ -202,10 +210,11 @@ class Tsk:
         with io.BytesIO() as output:
             run_bounded(command, output, limit=32 * 1024 * 1024, timeout=self.timeout)
             output.seek(0)
+            encoding = _output_encoding()
             try:
-                text = output.read().decode("utf-8", errors="strict")
+                text = output.read().decode(encoding, errors="strict")
             except UnicodeError as exc:
-                raise RecoveryError("fls output is not valid UTF-8; refusing ambiguous names.") from exc
+                raise RecoveryError(f"fls output is not valid {encoding}; refusing ambiguous names.") from exc
         return text
 
     def scan(self, image: Path, offset: int, sector_size: int) -> tuple[list[dict], list[str]]:
@@ -265,4 +274,15 @@ class Tsk:
             raise RecoveryError("Invalid or unsupported NTFS data attribute identifier.")
         command = self.command("icat", image, offset, sector_size)
         command += ["-r", str(image), inode]
+        run_bounded(command, output, limit=limit, timeout=self.timeout)
+
+    def extract_bitmap(self, image: Path, offset: int, sector_size: int, output, limit: int) -> None:
+        # A fixed NTFS metadata record, never a user-controlled candidate ID.
+        command = self.command("icat", image, offset, sector_size) + [str(image), "6"]
+        run_bounded(command, output, limit=limit, timeout=self.timeout)
+
+    def extract_log_metadata(self, image: Path, offset: int, sector_size: int, record: int, output, limit: int) -> None:
+        if type(record) is not int or record not in (0, 2):
+            raise RecoveryError("Only the fixed $MFT and $LogFile records are supported.")
+        command = self.command("icat", image, offset, sector_size) + [str(image), str(record)]
         run_bounded(command, output, limit=limit, timeout=self.timeout)

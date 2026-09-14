@@ -8,12 +8,16 @@ Windows 11 only. No existing disk/volume/VHD can be supplied as a target.
 The output parent must exist; this script always creates a unique child directory.
 The only formatted disk is the newly created VHD, resolved via Get-DiskImage.
 Recycle-bin APIs are always scoped to that verified volume; never all drives.
-Not yet exercised on Windows. Read docs/windows-testing.md before running.
+Exercised on Windows 11. Read docs/windows-testing.md for partial acceptance results.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string] $OutputParent
+    [string] $OutputParent,
+    [ValidateSet('basic', 'expanded')]
+    [string] $Profile = 'basic',
+    [ValidateRange(0, 64)]
+    [int] $WritePressureMiB = 0
 )
 
 Set-StrictMode -Version Latest
@@ -81,14 +85,28 @@ function Assert-OwnedVhd {
     if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'VHD is a reparse point.' }
     if ($item.DirectoryName -ne $fixtureWork) { throw 'VHD is outside the unique work directory.' }
 }
+function Write-FixtureDiskpartScript([string] $Path, [string[]] $Lines) {
+    # DiskPart /s ignores UTF-16 scripts on the tested Windows 11 build even
+    # when its exit code is zero. Use the Windows ANSI code page without a BOM.
+    # Reject unrepresentable paths instead of silently replacing characters.
+    $encoding = [Text.Encoding]::GetEncoding([Text.Encoding]::Default.CodePage,
+        [Text.EncoderFallback]::ExceptionFallback, [Text.DecoderFallback]::ExceptionFallback)
+    $text = (($Lines + 'exit') -join "`r`n") + "`r`n"
+    try { $bytes = $encoding.GetBytes($text) }
+    catch [Text.EncoderFallbackException] {
+        throw 'DiskPart path cannot be encoded in the Windows ANSI code page. Use an ASCII output parent.'
+    }
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length) }
+    finally { $stream.Dispose() }
+}
 function Invoke-FixtureDiskpart([string] $Name, [string[]] $Lines) {
     # Microsoft requires at least 15 seconds between successive diskpart scripts.
     $remaining = 15 - ([DateTime]::UtcNow - $script:fixtureLastDiskpart).TotalSeconds
     if ($remaining -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Ceiling($remaining * 1000)) }
     if ($Name -eq 'format') { $null = Get-OwnedDisk }
     $scriptPath = Join-Path $fixtureWork ($Name + '.diskpart.txt')
-    # UTF-16LE BOM preserves non-ASCII directory names on Windows.
-    [IO.File]::WriteAllText($scriptPath, (($Lines + 'exit') -join "`r`n"), [Text.Encoding]::Unicode)
+    Write-FixtureDiskpartScript $scriptPath $Lines
     $diskpartOutput = & "$env:SystemRoot\System32\diskpart.exe" /s $scriptPath 2>&1
     $diskpartExit = $LASTEXITCODE
     $script:fixtureLastDiskpart = [DateTime]::UtcNow
@@ -103,8 +121,10 @@ function Get-OwnedDisk {
     $disks = @($image | Get-Disk -ErrorAction Stop)
     if ($disks.Count -ne 1) { throw 'Owned VHD did not resolve to exactly one disk.' }
     $disk = $disks[0]
+    # Get-Disk exposes BusType as a display string. Read the underlying CIM
+    # UInt16 so the file-backed virtual-disk guard does not depend on labels.
     if ($disk.IsBoot -or $disk.IsSystem -or [long]$disk.Size -ne $fixtureBytes -or
-        [int]$disk.LogicalSectorSize -ne 512 -or [int]$disk.BusType -ne 15) {
+        [int]$disk.LogicalSectorSize -ne 512 -or [int]$disk.CimInstanceProperties['BusType'].Value -ne 15) {
         throw 'Attached disk is not the expected 128 MiB, 512-sector file-backed virtual disk.'
     }
     if ($null -ne $fixtureDiskNumber -and [int]$disk.Number -ne $fixtureDiskNumber) {
@@ -149,7 +169,9 @@ function Assert-SamplePath([string] $Path) {
         if ($node.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw 'Synthetic sample path contains a reparse point.'
         }
-        if ($node.PSIsContainer) { $node = $node.Parent } else { $node = $node.Directory }
+        # Parent/Directory return plain DirectoryInfo objects without the
+        # PSIsContainer note property added by Get-Item.
+        if ($node -is [IO.DirectoryInfo]) { $node = $node.Parent } else { $node = $node.Directory }
         if ($null -eq $node) { break }
     }
 }
@@ -332,6 +354,84 @@ function Assert-ExactSample($Entry) {
         throw 'Synthetic sample changed; deletion refused.'
     }
 }
+function Write-FixtureRandomFile([string] $Path, [int] $Size, [switch] $AsciiText) {
+    if ($Size -lt 0 -or $Size -gt 1MB) { throw 'Random sample size is outside the supported range.' }
+    $bytes = New-Object byte[] $Size
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $random.GetBytes($bytes) } finally { $random.Dispose() }
+    if ($AsciiText) {
+        for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = 65 + ($bytes[$i] % 26) }
+    }
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+    finally { $stream.Dispose() }
+}
+function Add-RandomSample([string] $Relative, [string] $Scenario, [int] $Size, [string] $Edit = 'none') {
+    Assert-OwnedVolume -RequireMarker
+    if ($Relative -notmatch '^Samples\\' -or $Relative.Contains('..') -or $Relative.Contains(':')) {
+        throw 'Random sample must be under the synthetic Samples directory.'
+    }
+    $path = Join-Path $fixtureRoot $Relative
+    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path))
+    $initialSize = if ($Edit -eq 'shrink') { $Size + 101 } else { $Size }
+    Write-FixtureRandomFile $path $initialSize -AsciiText:($path.EndsWith('.txt'))
+    if ($Edit -ne 'none') {
+        Assert-SamplePath $path
+        [RecoveryFixtureNative]::FlushVolume($fixtureRoot)
+        if ($Edit -eq 'shrink') {
+            $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try { $stream.SetLength($Size); $stream.Flush($true) } finally { $stream.Dispose() }
+        } elseif ($Edit -eq 'rewrite') {
+            $replacement = New-Object byte[] $Size
+            $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+            try { $rng.GetBytes($replacement) } finally { $rng.Dispose() }
+            for ($i = 0; $i -lt $replacement.Length; $i++) { $replacement[$i] = 97 + ($replacement[$i] % 26) }
+            $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try { $stream.Write($replacement, 0, $replacement.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+        } elseif ($Edit -eq 'rename') {
+            $renamed = Join-Path ([IO.Path]::GetDirectoryName($path)) ('renamed-' + ([string][char]0x6587 * 48) + '-' + [IO.Path]::GetFileName($path))
+            $renamed = [IO.Path]::GetFullPath($renamed)
+            if (-not $renamed.StartsWith((Join-Path $fixtureRoot 'Samples\'), [StringComparison]::OrdinalIgnoreCase) -or
+                $renamed.Length -gt 240 -or [IO.File]::Exists($renamed)) { throw 'Invalid synthetic rename destination.' }
+            [IO.File]::Move($path, $renamed)
+            $path = $renamed
+            $Relative = $path.Substring($fixtureRoot.Length)
+        } else { throw 'Unsupported synthetic file edit.' }
+        Write-FixtureEvent 'synthetic-file-edited' @{ path = $path; edit = $Edit; final_size = $Size }
+    }
+    $original = Join-Path (Join-Path $fixtureWork 'originals') $Relative
+    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($original))
+    [IO.File]::Copy($path, $original, $false)
+    $fixtureEntries.Add([pscustomobject][ordered]@{
+        original_path = $path; relative_path = $Relative.Replace('\', '/')
+        size = [long](Get-Item -LiteralPath $path).Length
+        sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        scenario = $Scenario; synthetic = $true; content_pattern = 'cryptographic-random'; edit = $Edit
+    })
+}
+function Add-WritePressure {
+    Assert-OwnedVolume -RequireMarker
+    $folder = Join-Path $fixtureRoot 'Samples\additional-writes'
+    if (Test-Path -LiteralPath $folder) { throw 'Write pressure requires a new synthetic directory.' }
+    $null = [IO.Directory]::CreateDirectory($folder)
+    Assert-SamplePath $folder
+    $files = New-Object 'System.Collections.Generic.List[object]'
+    # Create small records as well as bulk data. Their bytes and allocation
+    # outcomes are evidence, not a promise of which deleted clusters are reused.
+    for ($i = 0; $i -lt 64 + $WritePressureMiB; $i++) {
+        Assert-OwnedVolume -RequireMarker
+        $size = if ($i -lt 64) { 257 } else { 1MB }
+        $path = Join-Path $folder ('write-{0:D3}.bin' -f $i)
+        Write-FixtureRandomFile $path $size
+        $files.Add(@{ relative_path = $path.Substring($fixtureRoot.Length).Replace('\', '/'); size = $size
+            sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() })
+    }
+    Write-FixtureJson (Join-Path $fixtureWork 'write-pressure.json') @{
+        schema_version = 1; fixture_id = $fixtureId; stage = 'after-additional-writes'
+        bulk_mib = $WritePressureMiB; small_file_count = 64; files = @($files.ToArray())
+    }
+    Write-FixtureEvent 'additional-writes-complete' @{ bulk_mib = $WritePressureMiB; small_files = 64 }
+}
 function Get-RecycleEvidence([object[]] $Expected) {
     Assert-OwnedVolume -RequireMarker
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -398,12 +498,17 @@ try {
         fixture_id = $fixtureId; created_utc = [DateTime]::UtcNow.ToString('o')
         os = [Environment]::OSVersion.VersionString; powershell = $PSVersionTable.PSVersion.ToString()
         process_architecture = $env:PROCESSOR_ARCHITECTURE; vhd_bytes = $fixtureBytes
+        diskpart_code_page = [Text.Encoding]::Default.CodePage
+        profile = $Profile; write_pressure_mib = $WritePressureMiB
         script_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
         note = 'Synthetic logical NTFS test; does not simulate physical SSD TRIM or hardware failure.'
     })
     Write-FixtureEvent 'creating-new-fixed-vhd' @{ path = $fixtureVhd; bytes = $fixtureBytes }
     if (Test-Path -LiteralPath $fixtureVhd) { throw 'Refusing an existing VHD.' }
     Invoke-FixtureDiskpart 'create' @("create vdisk file=`"$fixtureVhd`" maximum=128 type=fixed")
+    if (-not [IO.File]::Exists($fixtureVhd)) {
+        throw 'DiskPart returned without creating the VHD. Inspect create.diskpart.log; no disk was attached.'
+    }
     $fixtureCreated = $true
     [RecoveryFixtureNative]::ExportFixedVhd($fixtureVhd, $null, $fixtureBytes)
     $null = Mount-DiskImage -ImagePath $fixtureVhd -Access ReadWrite -NoDriveLetter -PassThru
@@ -440,17 +545,34 @@ try {
     if ((Test-Path -LiteralPath $initialBin) -and [RecoveryFixtureNative]::Count($fixtureRoot) -ne 0) {
         throw 'New test volume has unexpected recycled items.'
     }
-    Add-SyntheticSample 'Samples\direct\small-note.txt' 'direct-file' 'text' 1
+    # Unicode constructed from codepoints so Windows PowerShell 5.1 can read
+    # this ASCII script. Exercise Unicode in direct deletion as well as $I.
+    $unicodeName = [string][char]0x4E2D + [char]0x6587 + '.txt'
+    Add-SyntheticSample ('Samples\direct\' + $unicodeName) 'direct-file' 'text' 1
     Add-SyntheticSample 'Samples\direct\large-note.txt' 'direct-file' 'large-text' 2
     Add-SyntheticSample 'Samples\deleted-folder\nested\report.txt' 'direct-directory' 'large-text' 3
     Add-SyntheticSample 'Samples\deleted-folder\photo.png' 'direct-directory' 'png' 4
-    # Unicode constructed from codepoints so this script remains ASCII-compatible with Windows PowerShell 5.1.
-    $unicodeName = [string][char]0x4E2D + [char]0x6587 + '.txt'
     Add-SyntheticSample ('Samples\recycle-a\' + $unicodeName) 'recycle-bin' 'large-text' 5
     Add-SyntheticSample 'Samples\recycle-a\same-name.txt' 'recycle-bin' 'text' 6
     Add-SyntheticSample 'Samples\recycle-b\same-name.txt' 'recycle-bin' 'large-text' 7
     Add-SyntheticSample 'Samples\recycle-b\photo.png' 'recycle-bin' 'png' 8
     Add-SyntheticSample 'Samples\retained\control.txt' 'retained-control' 'large-text' 9
+    if ($Profile -eq 'expanded') {
+        $sizes = @(0, 1, 63, 127, 255, 383, 511, 639, 767, 1023, 2049, 4095, 4096, 4097, 32769)
+        foreach ($size in $sizes) {
+            Add-RandomSample ('Samples\direct\random-{0:D5}.txt' -f $size) 'direct-file' $size
+        }
+        foreach ($size in @(63, 255, 639, 4097)) {
+            Add-RandomSample ('Samples\recycle-c\random-{0:D5}.bin' -f $size) 'recycle-bin' $size
+        }
+        foreach ($edit in @('rewrite', 'shrink', 'rename')) {
+            Add-RandomSample ('Samples\direct\' + $edit + '-79.txt') 'direct-file' 79 $edit
+            Add-RandomSample ('Samples\direct\' + $edit + '-511.txt') 'direct-file' 511 $edit
+        }
+        $longPart = ([string][char]0x4E2D + [char]0x6587) * 12
+        Add-RandomSample ('Samples\direct\' + $longPart + '\' + $longPart + '\long-name-' + $longPart + '.txt') 'direct-file' 255
+        Add-RandomSample 'Samples\retained\random-control.bin' 'retained-control' 4097
+    }
     Write-FixtureJson (Join-Path $fixtureWork 'originals.manifest.json') @{
         schema_version = 1; fixture_id = $fixtureId; files = @($fixtureEntries.ToArray())
     }
@@ -499,6 +621,12 @@ try {
     }
     Write-FixtureEvent 'test-volume-only-recycle-bin-emptied' @{ root = $fixtureRoot; targets = $recycled.Count }
     Export-Stage 'after-empty-recycle-bin' @($direct + $recycled)
+    if ($WritePressureMiB -gt 0) {
+        Mount-OwnedFixture
+        Add-WritePressure
+        foreach ($entry in @($fixtureEntries | Where-Object { $_.scenario -eq 'retained-control' })) { Assert-ExactSample $entry }
+        Export-Stage 'after-additional-writes' @($direct + $recycled)
+    }
     Write-FixtureJson (Join-Path $fixtureWork 'result.json') @{
         status = 'complete'; fixture_id = $fixtureId; stages = @($fixtureSnapshots.ToArray())
         note = 'Fixture creation completed; recovery quality has not been measured.'
