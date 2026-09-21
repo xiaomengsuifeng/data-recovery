@@ -84,7 +84,8 @@ def build(cache: Path, output: Path) -> Path:
     (output/'使用说明.md').write_text(
         '# 拾回使用说明\n\n双击 `Start-ShiHui.cmd` 启动。\n\n'
         '- [桌面操作、支持范围与故障处理](docs/desktop-guide.md)\n'
-        '- [候选版交付与验收边界](docs/milestones/11-extended-software.md)\n'
+        '- [自动测试与覆盖范围](docs/test-matrix.md)\n'
+        '- [候选版交付与验收边界](docs/milestones/12-automated-coverage.md)\n'
         '- [Windows 验证工具使用方法](docs/windows-testing.md)\n', encoding='utf-8')
     shutil.copy2(ROOT/'tools/runtime-lock.json',output/'runtime-lock.json')
     (output/'validation').mkdir()
@@ -117,7 +118,7 @@ def build(cache: Path, output: Path) -> Path:
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cache',type=Path,default=ROOT/'artifacts/downloads')
-    parser.add_argument('--output',type=Path,default=ROOT/'dist/ShiHui-0.3.0rc1-windows-x64')
+    parser.add_argument('--output',type=Path,default=ROOT/'dist/ShiHui-0.3.0rc2-windows-x64')
     args=parser.parse_args()
     package=build(args.cache,args.output)
     print(json.dumps({'package':str(package),'bytes':package.stat().st_size,'sha256':sha(package)},indent=2))

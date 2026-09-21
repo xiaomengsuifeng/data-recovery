@@ -189,6 +189,17 @@ def _run_locked(directory, state, reader):
         atomic_json(path, state)
     try:
         with image.open("r+b", buffering=0) as stream:
+            def write_range(at, data):
+                stream.seek(at)
+                pending = memoryview(data)
+                while pending:
+                    checkpoint()
+                    written = stream.write(pending)
+                    if not written:
+                        raise OSError("Destination did not accept acquisition bytes.")
+                    pending = pending[written:]
+                os.fsync(stream.fileno())
+
             while True:
                 checkpoint()
                 # Finish the coarse pass over healthy areas before returning
@@ -224,20 +235,11 @@ def _run_locked(directory, state, reader):
                         replacement = dict(item, size=amount, attempts=attempts, error=str(exc)[:1024],
                                            status="bad" if attempts > options["retries"] else "pending")
                         if replacement["status"] == "bad":
-                            stream.seek(at)
-                            stream.write(bytes(amount))
-                            os.fsync(stream.fileno())
+                            write_range(at, bytes(amount))
                     ranges[index:index + 1] = [replacement, *remainder]
                     save()
                     continue
-                stream.seek(at)
-                pending = memoryview(data)
-                while pending:
-                    written = stream.write(pending)
-                    if not written:
-                        raise OSError("Destination did not accept acquisition bytes.")
-                    pending = pending[written:]
-                os.fsync(stream.fileno())
+                write_range(at, data)
                 ranges[index:index + 1] = [dict(offset=at, size=amount, status="good", sha256=hashlib.sha256(data).hexdigest()), *remainder]
                 save()
             _check(source)

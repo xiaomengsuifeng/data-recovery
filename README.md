@@ -1,16 +1,18 @@
 # 拾回 · 免费数据恢复
 
-面向 Windows 普通用户的本地 NTFS / exFAT 误删文件恢复工具。当前版本 **0.3.0rc1 软件候选版**，提供扫描、筛选、预览、导出、PNG/JPEG 内容扫描、有界 JPEG 碎片重组、只读镜像采集与中断续接；开源、无需账号、无恢复容量收费门槛。
+面向 Windows 普通用户的本地 NTFS / exFAT 误删文件恢复工具。当前版本 **0.3.0rc2 软件候选版**，提供扫描、筛选、预览、导出、PNG/JPEG 内容扫描、有界 JPEG 碎片重组、只读镜像采集与中断续接；开源、无需账号、无恢复容量收费门槛。
 
 主要解决直接删除、误删文件夹，以及清空回收站后仍留有可读取记录的文件恢复。文件是否能恢复取决于残留数据；不把候选数量或预览成功当作恢复成功率。
 
 ## Windows 使用
 
-当前源码构建的候选包为 `ShiHui-0.3.0rc1-windows-x64.zip`，完整解压后双击 `Start-ShiHui.cmd`。便携包自带 Python、Qt 和 TSK，无需安装开发环境。直接读取设备需要管理员权限，软件、工作目录和输出需位于另一块物理磁盘。
+当前源码构建的候选包为 `ShiHui-0.3.0rc2-windows-x64.zip`，完整解压后双击 `Start-ShiHui.cmd`。便携包自带 Python、Qt 和 TSK，无需安装开发环境。直接读取设备需要管理员权限，软件、工作目录和输出需位于另一块物理磁盘。
 
-本轮已补齐四项扩展软件任务，专用物理介质验收按用户安排暂缓。0.3.0rc1 为本地交付，尚未上传 GitHub Release；历史 0.2.0 包不含本轮更新。GitHub 自动生成的 “Source code” 压缩包仅包含项目源码。
+本轮扩展自动测试，修复坏区零填充短写和损坏扫描断点的错误处理。专用物理介质验收按用户安排暂缓。0.3.0rc2 为本地交付，尚未上传 GitHub Release；历史 0.2.0 包不含本轮更新。GitHub 自动生成的 “Source code” 压缩包仅包含项目源码。
 
 - [桌面使用说明、支持范围和常见问题](docs/desktop-guide.md)
+- [自动测试范围、运行命令与覆盖报告](docs/test-matrix.md)
+- [0.3.0rc2 测试结果、修复与交付边界](docs/milestones/12-automated-coverage.md)
 - [0.3.0rc1 四项扩展功能与验收证据](docs/milestones/11-extended-software.md)
 - [0.2.1rc1 软件收尾、验证方法与交付边界](docs/milestones/10-software-completion.md)
 - [0.2.0 开发验收与验证边界](docs/milestones/02-desktop-test-release.md)
@@ -25,16 +27,16 @@ Windows 卷枚举、只读访问、同物理盘拦截和管理员重启已实现
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[desktop,audit]'
+.venv/bin/python -m pip install -e '.[desktop,test,audit]'
 PYTHONPATH=src .venv/bin/python -B -m recovery_desktop --tsk-bin /path/to/tsk/bin
-PYTHONPATH=src QT_QPA_PLATFORM=offscreen .venv/bin/python -B -m unittest discover -s tests -v
+.venv/bin/python -B tools/run_automated_tests.py --output test-results
 ```
 
 开发桌面推荐 Python 3.11–3.13。包内运行时固定为 Python 3.13.12 x64。CLI 提供 `doctor / scan / resume-scan / acquire / resume-acquire / recover / verify / validate-fixture`；CLI 扫描入口限镜像，Windows 卷扫描通过桌面提供。
 
 [开发命令、报告格式、可复现演示和 Windows 打包](docs/development.md)。Windows 包由固定上游归档离线组装，`tools/runtime-lock.json` 锁定下载地址、长度、SHA-256 和实际选用模块；包内附有对应开源组件源码与许可。
 
-自动测试包含 exFAT 几何与位图、JPEG 熵检查与歧义拒绝、坏区隔离、采集与扫描续接、Windows 保护、Qt 及旧功能回归，完整计数见[最新验收记录](docs/milestones/11-extended-software.md)。真实 Windows exFAT 删除实验的内容、文件名和目录匹配均为 26/26；JPEG 碎片另用独立原件核验。原生窗口验收覆盖 100%、125%、150%、200% 缩放。NIST 历史样本的参考摘要来自删除后指定磁盘区域，[证据边界单独记录](tests/integration/fixture-source.md)。
+管理员自动测试 359 项全部通过，含 1,710 个参数子用例，无失败或跳过；本机 Python 测试进程的源码行覆盖率 90.63%、分支覆盖率 81.93%，未排除源文件。[最新验收记录](docs/milestones/12-automated-coverage.md)列出各项证据及未覆盖边界。真实 Windows exFAT 删除实验的内容、文件名和目录匹配均为 26/26；JPEG 碎片另用独立原件核验。原生窗口验收覆盖 100%、125%、150%、200% 缩放。NIST 历史样本的参考摘要来自删除后指定磁盘区域，[证据边界单独记录](tests/integration/fixture-source.md)。
 
 隔离样本已保存 9 个删除前原件并生成四阶段镜像。同时启用 PNG 和旧日志扫描后，阶段内容匹配为 0/0、4/4、2/4、6/8，原路径匹配为 0、4、2、6。另导出 1 份文字片段，不计入完整恢复；仍有 2 个 TXT 未完整恢复，整轮保持 `incomplete`。另一独立生成的同类 Windows 样本得到相同计数。[使用方法](docs/windows-testing.md) · [验收报告](docs/milestones/07-ntfs-log-recovery.md)
 

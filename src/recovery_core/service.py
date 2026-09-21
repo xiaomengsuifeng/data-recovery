@@ -134,7 +134,8 @@ def resume_scan(session: Path, *, backend: Tsk) -> dict:
             or not isinstance(state.get("source"), dict) or state["source"].get("kind") == "windows_volume"
             or not isinstance(state.get("stages"), dict)
             or set(state["stages"]) - {"metadata", "png", "jpeg", "log"}
-            or state.get("backend", {}).get("versions") != backend.versions):
+            or not isinstance(state.get("backend"), dict)
+            or state["backend"].get("versions") != backend.versions):
         raise RecoveryError("扫描断点格式或版本不匹配；实时卷无法断点续扫，请先采集镜像。")
     _validate_scan_options(state.get("options"))
     for stage in state["stages"].values():
