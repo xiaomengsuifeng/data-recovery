@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import ctypes
 from dataclasses import dataclass
+import io
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import subprocess
 from .control import checkpoint
 
 from .common import RecoveryError
+from .tsk import run_bounded
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,7 @@ class VolumeSource:
 
 _DISCOVER = r"""
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 $rows = @(Get-Volume | Where-Object { $_.DriveLetter -and $_.FileSystem -eq 'NTFS' } | ForEach-Object {
   $v = $_
@@ -42,15 +45,24 @@ ConvertTo-Json -InputObject $rows -Depth 5 -Compress
 def list_volumes() -> list[dict]:
     if os.name != "nt":
         return []
-    executable = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    encoded = base64.b64encode(_DISCOVER.encode("utf-16le")).decode("ascii")
-    result = subprocess.run([str(executable), "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
-                            creationflags=subprocess.CREATE_NO_WINDOW, check=False)
-    if result.returncode:
-        raise RecoveryError("无法枚举 Windows 磁盘，请检查 Storage 服务或管理员权限。")
+    return _query_volumes(_DISCOVER)
+
+
+def _query_volumes(script: str) -> list[dict]:
+    """Bound and cancel Storage queries just like the recovery subprocesses."""
     checkpoint()
-    data = json.loads(result.stdout.decode("utf-8-sig"))
+    executable = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    output = io.BytesIO()
+    try:
+        run_bounded([str(executable), "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                    output, limit=4 * 1024 * 1024, timeout=30)
+    except (OSError, RecoveryError) as exc:
+        raise RecoveryError("无法查询 Windows 磁盘，请检查连接、Storage 服务或管理员权限。") from exc
+    try:
+        data = json.loads(output.getvalue().decode("utf-8-sig"))
+    except (UnicodeError, ValueError) as exc:
+        raise RecoveryError("Windows 返回了无效的磁盘列表，请刷新后重试。") from exc
     return validate_volume_rows(data)
 
 
@@ -58,14 +70,19 @@ def validate_volume_rows(data) -> list[dict]:
     if not isinstance(data, list):
         raise RecoveryError("Windows 返回了无效的磁盘列表。")
     for row in data:
-        if not isinstance(row, dict) or not re.fullmatch(r"[A-Za-z]:\\", row.get("mount", "")):
+        if (not isinstance(row, dict) or not isinstance(row.get("mount"), str)
+                or not re.fullmatch(r"[A-Za-z]:\\", row["mount"])):
             raise RecoveryError("Windows 返回了无效的盘符。")
         if (type(row.get("size")) is not int or row["size"] <= 0
                 or not isinstance(row.get("disk_numbers"), list)
                 or any(type(n) is not int or n < 0 for n in row["disk_numbers"])
                 or not isinstance(row.get("disk_ids"), list)
                 or any(not isinstance(n, str) or not n for n in row["disk_ids"])
-                or row.get("sector_size") not in (512, 1024, 2048, 4096)):
+                or type(row.get("sector_size")) is not int
+                or row["sector_size"] not in (512, 1024, 2048, 4096)
+                or not isinstance(row.get("guid"), str)
+                or not isinstance(row.get("label", ""), str)
+                or type(row.get("system", False)) is not bool):
             raise RecoveryError("磁盘身份或布局不完整，未允许直接访问。")
     return data
 
@@ -73,11 +90,12 @@ def validate_volume_rows(data) -> list[dict]:
 def volume_identity(mount: str) -> dict:
     if os.name != "nt":
         raise RecoveryError("直接磁盘扫描仅在 Windows 上提供；此系统可扫描镜像。")
-    if not re.fullmatch(r"[A-Za-z]:\\?", mount):
+    if not isinstance(mount, str) or not re.fullmatch(r"[A-Za-z]:\\?", mount):
         raise RecoveryError("只支持明确的 Windows 卷盘符。")
     mount = mount[:2].upper() + "\\"
     matches = [v for v in list_volumes() if v["mount"].upper() == mount]
-    if len(matches) != 1 or not matches[0]["guid"] or not matches[0]["disk_numbers"]:
+    if (len(matches) != 1 or not matches[0]["guid"] or not matches[0]["disk_numbers"]
+            or not matches[0]["disk_ids"]):
         raise RecoveryError("无法确认此 NTFS 卷对应的物理磁盘。请检查磁盘连接。")
     value = matches[0]
     return dict(value, kind="windows_volume", path="\\\\.\\" + mount[:2])
@@ -108,14 +126,7 @@ def ensure_other_disk(source: dict, destination: Path):
         raise RecoveryError("恢复目标与工作目录需要位于另一块本地物理磁盘。")
     # Query all filesystem types for the destination, not just NTFS volumes.
     script = _DISCOVER.replace("$_.DriveLetter -and $_.FileSystem -eq 'NTFS'", "$_.DriveLetter")
-    encoded = base64.b64encode(script.encode("utf-16le")).decode()
-    ps = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe")
-    result = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-                            capture_output=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
-    if result.returncode:
-        raise RecoveryError("无法核对目标物理磁盘。")
-    checkpoint()
-    rows = validate_volume_rows(json.loads(result.stdout.decode("utf-8-sig")))
+    rows = _query_volumes(script)
     matches = [v for v in rows if v["mount"][:2].upper() == drive.upper()]
     if len(matches) != 1 or not matches[0]["disk_numbers"]:
         raise RecoveryError("无法确认目标位置所在的物理磁盘。")
@@ -142,6 +153,8 @@ def read_volume_boot(identity: dict) -> bytes:
             boot = source.read(4096)
     except PermissionError as exc:
         raise RecoveryError("读取磁盘需要管理员权限，请使用“以管理员身份重新启动”。") from exc
+    except OSError as exc:
+        raise RecoveryError("源磁盘无法读取，可能已断开、锁定或发生读取错误。请检查连接后重新扫描。") from exc
     if boot[3:11] != b"NTFS    " or boot[510:512] != b"\x55\xaa":
         raise RecoveryError("未读到 NTFS 引导信息；磁盘可能被加密、锁定或不受支持。")
     return boot
@@ -154,8 +167,34 @@ def is_admin() -> bool:
 def elevate(arguments: list[str]):
     if os.name != "nt":
         raise RecoveryError("此操作仅用于 Windows。")
+    error = _shell_elevate(arguments)
+    if error == 1223:  # ERROR_CANCELLED, including dismissal of the UAC prompt.
+        raise RecoveryError("已取消管理员授权，当前窗口和扫描记录已保留。")
+    if error:
+        raise RecoveryError(f"管理员启动失败（Windows 错误 {error}），当前窗口已保留。")
+
+
+def _shell_elevate(arguments: list[str]) -> int:
+    from ctypes import wintypes
     import sys
-    result = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable,
-                                                subprocess.list2cmdline(arguments), None, 1)
-    if result <= 32:
-        raise RecoveryError("管理员启动未完成。")
+
+    class ShellExecuteInfo(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("fMask", wintypes.ULONG),
+                    ("hwnd", wintypes.HWND), ("lpVerb", wintypes.LPCWSTR),
+                    ("lpFile", wintypes.LPCWSTR), ("lpParameters", wintypes.LPCWSTR),
+                    ("lpDirectory", wintypes.LPCWSTR), ("nShow", ctypes.c_int),
+                    ("hInstApp", wintypes.HINSTANCE), ("lpIDList", ctypes.c_void_p),
+                    ("lpClass", wintypes.LPCWSTR), ("hkeyClass", wintypes.HKEY),
+                    ("dwHotKey", wintypes.DWORD), ("hIcon", wintypes.HANDLE),
+                    ("hProcess", wintypes.HANDLE)]
+
+    execute = ctypes.WinDLL("shell32", use_last_error=True).ShellExecuteExW
+    execute.argtypes, execute.restype = [ctypes.POINTER(ShellExecuteInfo)], wintypes.BOOL
+    info = ShellExecuteInfo()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = 0x100 | 0x400  # Finish launch before returning; show errors in our window.
+    info.lpVerb, info.lpFile = "runas", sys.executable
+    info.lpParameters, info.nShow = subprocess.list2cmdline(arguments), 1
+    if execute(ctypes.byref(info)):
+        return 0
+    return ctypes.get_last_error() or 1

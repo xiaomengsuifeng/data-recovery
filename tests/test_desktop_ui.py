@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 try:
     from PySide6.QtWidgets import QApplication
@@ -89,6 +90,53 @@ class DesktopUITests(unittest.TestCase):
         self.wait_task()
         self.assertTrue(self.window.home_button.isEnabled())
         self.assertFalse(self.window.cancel_button.isEnabled())
+
+    def test_failed_task_restores_controls_and_can_retry_preview(self):
+        def denied():
+            raise PermissionError('source denied')
+        self.window.run_task('reading', denied, lambda r: self.fail('Unexpected success'))
+        self.wait_task()
+        self.assertEqual(self.errors, ['source denied'])
+        self.assertTrue(self.window.home_button.isEnabled())
+        self.window.table.setCurrentIndex(self.window.proxy.index(0, 1))
+        self.window.request_preview()
+        self.wait_task()
+        self.assertEqual(self.window.preview_text.toPlainText(), 'hello')
+
+    def test_elevation_cancel_keeps_window_session_and_selection(self):
+        from recovery_core.common import RecoveryError
+        self.window.select_visible()
+        session, checked = self.window.session, set(self.window.model.checked)
+        self.window.workspace.setText(str(self.root))
+        with patch('recovery_desktop.app.elevate', side_effect=RecoveryError('已取消管理员授权')) as launch:
+            self.window.restart_admin()
+        self.assertTrue(self.window.isVisible())
+        self.assertEqual(self.window.session, session)
+        self.assertEqual(self.window.model.checked, checked)
+        self.assertIn('已取消管理员授权', self.errors[-1])
+        arguments = launch.call_args.args[0]
+        self.assertEqual(arguments[arguments.index('--session') + 1], str(session.resolve()))
+        self.assertEqual(arguments[arguments.index('--workspace') + 1], str(self.root.resolve()))
+
+    def test_partial_failure_explains_reason_and_pending_files(self):
+        self.window.last_output = self.root / 'result'
+        self.window.show_recovery(dict(status='completed', exported_unverified_count=0,
+            partial_count=0, failed_count=1, skipped_count=0, selected_count=2, processed_count=1,
+            results=[dict(status='failed', original_path='/a.txt', observed_path='/a.txt',
+                          saved_path=None, warnings=['目标磁盘空间不足'])]))
+        self.assertEqual(self.window.complete_title.text(), '保存未全部完成')
+        self.assertIn('目标磁盘空间不足', self.window.complete_text.toPlainText())
+        self.assertIn('还有 1 个', self.window.complete_text.toPlainText())
+
+    def test_closing_during_work_cancels_and_waits_for_worker_cleanup(self):
+        def work():
+            while True:
+                checkpoint()
+                time.sleep(.01)
+        self.window.run_task('reading', work, lambda result: None)
+        self.window.close()
+        self.wait_task()
+        self.assertFalse(self.window.isVisible())
 
     def test_deep_png_scan_preview_save_and_reopen(self):
         from test_carving import BitmapBackend, make_image, png

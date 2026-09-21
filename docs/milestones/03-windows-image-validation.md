@@ -35,6 +35,6 @@ NIST 镜像 SHA-256 为 `c863ccad01804b840a6dfa623a94996ca876e15ded41c6c0d8ae148
 
 ## 后续验收
 
-当前非管理员会话没有执行 UAC、隔离 VHD 生成、直接删除、Windows Shell 清空回收站或原始卷读取。接下来需要在管理员测试会话中运行 [New-RecoveryFixture.ps1](../../tools/windows/New-RecoveryFixture.ps1)，保存删除前原件，并按阶段清单独立核对导出内容与原名/目录。
+当前非管理员会话没有执行 UAC、隔离 VHD 生成、直接删除、Windows Shell 清空回收站或原始卷读取。接下来需要在管理员测试会话中按[隔离样本使用方法](../windows-testing.md)运行 New-RecoveryFixture.ps1，保存删除前原件，并按阶段清单独立核对导出内容与原名/目录。
 
 还需验证原始设备断开、真实源/目标隔离、CMD/快捷方式双击入口及不同 DPI、真实 HDD/SSD/移动介质。Windows 镜像流程和包内启动器通过不代表这些项目已通过，也不产生恢复率或竞品优势结论。

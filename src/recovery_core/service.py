@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import tempfile
+import uuid
 from collections import defaultdict
 from pathlib import Path
 from urllib.parse import quote
@@ -265,8 +266,13 @@ def recover(session: Path, destination: Path, *, backend: Tsk,
     results = []
     saved_names = set()
     status = "completed"
+    source_error = None
     for candidate in candidates:
-        # Handled through the existing cancellation/report path below.
+        try:
+            checkpoint()
+        except KeyboardInterrupt:
+            status = "cancelled"
+            break
         result = {
             "candidate_id": candidate["id"], "original_path": candidate["original_path"],
             "observed_path": candidate["observed_path"], "expected_size": candidate["size"],
@@ -284,7 +290,13 @@ def recover(session: Path, destination: Path, *, backend: Tsk,
             result["warnings"].append("File exceeds --max-file-bytes; it was not extracted.")
             continue
         import shutil
-        if shutil.disk_usage(directory).free < candidate["size"] + 1024 * 1024:
+        try:
+            free = shutil.disk_usage(directory).free
+        except OSError as exc:
+            result["status"] = "failed"
+            result["warnings"].append(f"无法读取目标磁盘剩余空间：{exc}")
+            break
+        if free < candidate["size"] + 1024 * 1024:
             result["status"] = "failed"
             result["warnings"].append("目标磁盘可用空间不足，未开始写入此文件。")
             continue
@@ -313,6 +325,12 @@ def recover(session: Path, destination: Path, *, backend: Tsk,
             except (RecoveryError, OSError) as exc:
                 result["warnings"].append(str(exc))
                 result["status"] = "partial" if target.is_file() else "failed"
+                if live:
+                    try:
+                        check_identity(source)
+                    except (RecoveryError, OSError) as identity_error:
+                        source_error = str(identity_error)
+                        status = "source_changed"
             if target.is_file():
                 result["saved_path"] = relative.as_posix()
                 result["actual_size"] = target.stat().st_size
@@ -324,12 +342,21 @@ def recover(session: Path, destination: Path, *, backend: Tsk,
                 except OSError as exc:
                     result["status"] = "partial"
                     result["warnings"].append(f"Could not hash saved bytes: {exc}")
+            if source_error is not None:
+                break
+        except OSError as exc:
+            result["status"] = "partial" if result["saved_path"] else "failed"
+            result["warnings"].append(f"无法继续读取或保存此文件：{exc}")
         except KeyboardInterrupt:
             result["warnings"].append("Cancelled during extraction or hashing; file checks did not finish.")
-            result["status"] = "partial" if target.is_file() else "failed"
-            if target.is_file():
-                result["saved_path"] = relative.as_posix()
-                result["actual_size"] = target.stat().st_size
+            result["status"] = "partial" if result["saved_path"] else "failed"
+            try:
+                if target.is_file():
+                    result["status"] = "partial"
+                    result["saved_path"] = relative.as_posix()
+                    result["actual_size"] = target.stat().st_size
+            except OSError as exc:
+                result["warnings"].append(f"取消后无法检查已保存的文件：{exc}")
             status = "cancelled"
             break
     source_verification = "not_completed_due_to_cancellation"
@@ -339,13 +366,18 @@ def recover(session: Path, destination: Path, *, backend: Tsk,
             source_verification = "live_volume_identity_only" if live else "unchanged"
         except KeyboardInterrupt:
             status = "cancelled"
-        except (RecoveryError, OSError):
+        except (RecoveryError, OSError) as exc:
             status = "source_changed"
             source_verification = "changed_or_unreadable"
+            source_error = str(exc)
+    if source_error is not None and status != "cancelled":
+        status = "source_changed"
+        source_verification = "changed_or_unreadable"
     result_report = {
         "schema_version": 1, "prototype_version": __version__, "status": status,
         "source": source, "source_verification": source_verification,
-        "session": str(session.resolve()), "results": results,
+        "source_error": source_error,
+        "session": str(session.resolve()), "destination": str(directory), "results": results,
         "selected_count": len(candidates), "processed_count": len(results),
         "exported_unverified_count": sum(r["status"] == "exported_unverified" for r in results),
         "partial_count": sum(r["status"] == "partial" for r in results),
@@ -353,5 +385,16 @@ def recover(session: Path, destination: Path, *, backend: Tsk,
         "skipped_count": sum(r["status"] == "skipped" for r in results),
         "integrity_note": "Successful extraction and a computed SHA-256 do not prove original content.",
     }
-    write_json(directory / "recovery.json", result_report)
+    try:
+        write_json(directory / "recovery.json", result_report)
+    except OSError as exc:
+        # A full or detached output disk must not discard the in-memory report.
+        # The existing session is on a separately checked safe working disk.
+        fallback = session / ("recovery-" + uuid.uuid4().hex + ".json")
+        result_report["report_path"] = str(fallback.resolve())
+        result_report["report_warning"] = f"目标位置无法保存完整报告，已改存扫描记录目录：{exc}"
+        try:
+            write_json(fallback, result_report)
+        except OSError as fallback_error:
+            raise RecoveryError("恢复报告无法写入目标位置或扫描记录目录。请检查目标和工作磁盘的连接、空间及权限。") from fallback_error
     return result_report

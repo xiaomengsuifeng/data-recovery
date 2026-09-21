@@ -78,14 +78,24 @@ def build(cache: Path, output: Path) -> Path:
         shutil.copy2(ROOT/path,output/path)
     for path in ('launch.pyw','Install-Shortcut.ps1'):
         shutil.copy2(ROOT/'tools/windows'/path,output/path)
-    shutil.copy2(ROOT/'docs/desktop-guide.md',output/'使用说明.md')
+    shutil.copytree(ROOT/'docs',output/'docs')
+    (output/'tests/integration').mkdir(parents=True)
+    shutil.copy2(ROOT/'tests/integration/fixture-source.md',output/'tests/integration/fixture-source.md')
+    (output/'使用说明.md').write_text(
+        '# 拾回使用说明\n\n双击 `Start-ShiHui.cmd` 启动。\n\n'
+        '- [桌面操作、支持范围与故障处理](docs/desktop-guide.md)\n'
+        '- [候选版交付与验收边界](docs/milestones/10-software-completion.md)\n'
+        '- [Windows 验证工具使用方法](docs/windows-testing.md)\n', encoding='utf-8')
     shutil.copy2(ROOT/'tools/runtime-lock.json',output/'runtime-lock.json')
     (output/'validation').mkdir()
     shutil.copy2(ROOT/'tools/windows/New-RecoveryFixture.ps1',output/'validation/New-RecoveryFixture.ps1')
     shutil.copy2(ROOT/'tools/windows/Invoke-RecoveryValidation.ps1',output/'validation/Invoke-RecoveryValidation.ps1')
     shutil.copy2(ROOT/'tools/windows/Invoke-LiveVolumeValidation.ps1',output/'validation/Invoke-LiveVolumeValidation.ps1')
     shutil.copy2(ROOT/'tools/live_volume_validation.py',output/'validation/live_volume_validation.py')
-    shutil.copy2(ROOT/'docs/windows-testing.md',output/'validation/windows-testing.md')
+    shutil.copy2(ROOT/'tools/run_desktop_acceptance.py',output/'validation/run_desktop_acceptance.py')
+    (output/'validation/windows-testing.md').write_text(
+        '# Windows 验证工具\n\n[完整使用方法、样本范围和验收说明](../docs/windows-testing.md)\n',
+        encoding='utf-8')
     (output/'Start-ShiHui.cmd').write_bytes(b'@echo off\r\nstart "" /D "%~dp0" "%~dp0runtime\\pythonw.exe" -B "%~dp0launch.pyw"\r\n')
     (output/'Create-Desktop-Shortcut.cmd').write_bytes(b'@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-Shortcut.ps1"\r\npause\r\n')
     (output/'Check-Package.cmd').write_bytes(b'@echo off\r\n"%~dp0runtime\\python.exe" -B "%~dp0check_package.py"\r\npause\r\n')
@@ -95,7 +105,7 @@ def build(cache: Path, output: Path) -> Path:
     for path in required:
         if not (output/path).is_file():raise ValueError('Missing package component: '+path)
     entries=[{'path':p.relative_to(output).as_posix(),'size':p.stat().st_size,'sha256':sha(p)} for p in sorted(output.rglob('*')) if p.is_file()]
-    (output/'package-manifest.json').write_text(json.dumps({'schema_version':1,'version':'0.2.0','platform':'Windows 11 x64',
+    (output/'package-manifest.json').write_text(json.dumps({'schema_version':1,'version':lock['version'],'platform':'Windows 11 x64',
         'windows_execution_verified':False,'files':entries},ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     with zipfile.ZipFile(zip_path,'x',compression=zipfile.ZIP_DEFLATED,compresslevel=6) as archive:
         for path in sorted(output.rglob('*')):
@@ -106,7 +116,7 @@ def build(cache: Path, output: Path) -> Path:
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cache',type=Path,default=ROOT/'artifacts/downloads')
-    parser.add_argument('--output',type=Path,default=ROOT/'dist/ShiHui-0.2.0-windows-x64')
+    parser.add_argument('--output',type=Path,default=ROOT/'dist/ShiHui-0.2.1rc1-windows-x64')
     args=parser.parse_args()
     package=build(args.cache,args.output)
     print(json.dumps({'package':str(package),'bytes':package.stat().st_size,'sha256':sha(package)},indent=2))

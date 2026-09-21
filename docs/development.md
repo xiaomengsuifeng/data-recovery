@@ -1,4 +1,4 @@
-# 拾回 0.2.0 开发说明
+# 拾回 0.2.1rc1 开发说明
 
 核心支持 NTFS 镜像及 Windows NTFS 卷，桌面采用 PySide6 / Qt Widgets，读取由独立 TSK 4.15.0 CLI 提供。核心 Python 代码无第三方运行依赖；桌面增加 PySide6-Essentials。自己的代码采用 MIT，第三方组件单独按其许可使用，见[第三方声明](../THIRD_PARTY_NOTICES.md)。
 
@@ -48,7 +48,7 @@ python3 -B -m recovery_core validate-fixture /path/to/ntfs-fixture-ID --output /
 ## 报告与路径
 
 - `session.json`：来源、几何参数、TSK 版本、候选记录、名称证据、警告与局限。
-- `recovery.json`：每个输出路径、字节数、SHA-256、导出/部分/失败/跳过状态，以及来源复核状态。
+- `recovery.json`：每个输出路径、字节数、SHA-256、导出/部分/失败/跳过状态，以及来源复核状态。`destination` 记录结果根目录，`saved_path` 相对此目录。目标无法写入报告时，改存扫描目录下新的 `recovery-<随机ID>.json`，返回 `report_path`、`report_warning`；两处都失败则明确报错。
 - `verification.json`：重新读取导出字节，按独立原件清单一对一匹配，分别统计内容、名称、目录。
 - `fixture-validation.json`：隔离样本各阶段的状态与匹配结果；明确区分不同删除目标数和跨阶段验证次数。
 
@@ -95,7 +95,9 @@ PYTHONPATH=src QT_QPA_PLATFORM=offscreen .venv/bin/python -B -m unittest discove
 QT_QPA_PLATFORM=offscreen .venv/bin/python -B tools/run_desktop_demo.py --output artifacts/desktop-new --tsk-bin /path/to/tsk/bin
 ```
 
-没有桌面依赖时 Qt 测试会跳过，完整验收必须安装 `[desktop]`。当前完整套件为 221 项，包含四阶段验收、Windows 兼容、PNG、旧日志、片段及界面回归。管理员全量记录见最新验收报告；自动套件与实际 VHD 删除实验分别保存证据。`run_desktop_demo.py` 操作实际 Qt 窗口和工作线程，输出截图、扫描/恢复/校验报告；离屏渲染适用于开发 CI，不等于 Windows 原生窗口或真实磁盘测试。
+没有桌面依赖时 Qt 测试会跳过，完整验收必须安装 `[desktop]`。当前完整套件为 238 项，包含四阶段验收、Windows 兼容、PNG、旧日志、片段、异常处理及界面回归。管理员全量记录见最新验收报告；自动套件与实际 VHD 删除实验分别保存证据。`run_desktop_demo.py` 操作实际 Qt 窗口和工作线程，输出截图、扫描/恢复/校验报告；离屏渲染适用于开发 CI，不等于 Windows 原生窗口或真实磁盘测试。
+
+`tools/run_desktop_acceptance.py` 对独立原件清单和 NTFS 镜像执行完整原生窗口验收，通过 `--scale 1 / 1.25 / 1.5 / 2` 分别启动不同缩放的 Qt 进程；不改系统设置。它检查窗口范围、按钮可达、文本/图片预览、恢复内容与原路径、会话重开和取消后的状态。便携包带有同一工具，使用 `--installed-runtime` 保证测试包内模块。[执行方法](milestones/10-software-completion.md)
 
 `tools/run_png_carving_demo.py --image /path/to/image.img --offset 128 --output /path/to/new-output --tsk-bin /path/to/tsk/bin` 使用实际 Qt/TSK 扫描、解码 PNG、导出并重新打开会话。偏移按实际镜像填写，Windows 设置 `QT_QPA_PLATFORM=windows` 可验证原生窗口；工具仅核对导出与扫描时字节一致，删除前原件仍由 `validate-fixture` 独立验证。
 
@@ -112,7 +114,7 @@ New-Item -ItemType Directory -Force .\artifacts
 
 该入口运行全部单元测试、TSK 启动检查、Windows PowerShell 5.1 语法检查、只读卷枚举，以及 NIST 镜像桌面演示；不创建测试卷或触发 UAC。`--qt-platform windows` 会短暂显示原生窗口，默认 `offscreen`。没有缓存时会下载并校验固定 NIST 样本，解压需要约 1 GiB 空间。输出中的 `tests.json` 逐项记录跳过原因，`validation.json` 汇总步骤结果，`desktop/` 保存截图和恢复证据。失败或超时返回非零退出码，已有输出不会覆盖。
 
-普通用户运行时，符号链接用例可能因权限不足而跳过；最新管理员套件为 221 项，全部通过且无跳过。统一入口中的 `windows_image_workflow_verified` 仅表示镜像流程，`full_windows_acceptance_verified` 保持为 `false`。实际 VHD 实验的组合场景仍为 `incomplete`，不能用自动测试通过覆盖该结果。[最新记录与边界](milestones/09-live-volume-validation.md)
+普通用户运行时，符号链接用例可能因权限不足而跳过；最新管理员套件为 238 项，全部通过且无跳过。统一入口中的 `windows_image_workflow_verified` 仅表示镜像流程，`full_windows_acceptance_verified` 保持为 `false`。实际 VHD 实验的组合场景仍为 `incomplete`，不能用自动测试通过覆盖该结果。[最新记录与边界](milestones/10-software-completion.md)
 
 演示使用 NIST DFR-01 镜像，导出 4,296 字节的 `Bunda.txt`，与文档指定的删除后磁盘区域核对。这不是独立删除前原件，也不是普遍恢复率证据。[样本说明](../tests/integration/fixture-source.md)
 
@@ -127,8 +129,8 @@ New-Item -ItemType Directory -Force .\artifacts
 ```sh
 python3 tools/fetch_windows_runtime.py
 python3 tools/build_windows_bundle.py
-.venv/bin/python tools/audit_windows_pe.py dist/ShiHui-0.2.0-windows-x64 --output artifacts/windows-pe-audit.json
-python3 dist/ShiHui-0.2.0-windows-x64/check_package.py
+.venv/bin/python tools/audit_windows_pe.py dist/ShiHui-0.2.1rc1-windows-x64 --output artifacts/windows-pe-audit.json
+python3 dist/ShiHui-0.2.1rc1-windows-x64/check_package.py
 ```
 
 `tools/runtime-lock.json` 记录版本、来源、长度、SHA-256、选用模块和对应源码。下载器只下载构建依赖，软件恢复过程中不联网。错误归档或 `.incomplete` 文件会保留并报错，检查后移走该文件再重试。
@@ -137,7 +139,7 @@ python3 dist/ShiHui-0.2.0-windows-x64/check_package.py
 
 `audit_windows_pe.py` 需 `[audit]` 开发依赖，静态核对 PE 位数及导入库。Python/Qt 是 x64，TSK 是单独的 x86 进程，运行库分开放置；此检查不能证明 Windows 动态加载行为。`check_package.py` 在非 Windows 仅核对清单，在 Windows 还实际启动 Qt 和 TSK。
 
-尚未签名，也未完成全部 Windows 实机验收。原始发布包的启动检查记录保留在[历史 Windows 镜像记录](milestones/03-windows-image-validation.md)。已实际运行管理员隔离 VHD 删除实验和只读虚拟卷的设备读取，并修复脚本兼容、中文名称和提权输出目录问题；读取中断连、应用 UAC 取消和物理介质仍需覆盖。
+尚未签名，也未完成全部 Windows 实机验收。原始发布包的启动检查记录保留在[历史 Windows 镜像记录](milestones/03-windows-image-validation.md)。已实际运行管理员隔离 VHD 删除实验和只读虚拟卷的设备读取，并修复脚本兼容、中文名称和提权输出目录问题；断连、权限、满盘和 UAC 取消的软件处理已自动验证，物理拔盘和真实安全桌面取消仍待外部环境验收。
 
 包含 PNG 深度扫描的本地包以 `ShiHui-0.2.0-png-recovery-windows-x64` 命名，原始 0.2.0 Release、fixture-validation 和 windows-acceptance 本地包不含新增内容扫描。构建与验收证据见[内容扫描验收记录](milestones/06-png-content-recovery.md)。本轮没有发布新的 GitHub Release。
 
@@ -145,4 +147,6 @@ python3 dist/ShiHui-0.2.0-windows-x64/check_package.py
 
 扩展样本验收包 `ShiHui-0.2.0-validation-windows-x64` 新增 `-Profile expanded -WritePressureMiB 4` 样本生成配置，以及 `Invoke-RecoveryValidation.ps1 -DeepPng -DeepLog` 串联选项。验证器支持追加写入后的第五阶段，并按删除场景和精确字节大小统计目标；该包对两组冻结基本样本和两组独立扩展样本完成实际复验。[结果与证据边界](milestones/08-expanded-fixture-validation.md)
 
-最新本地包为 `ShiHui-0.2.0-volume-validation-windows-x64`，包含直接卷验收脚本、Python 辅助工具和重新挂载盘符修复。包内 398 个文件清单及 147 个 PE 检查通过，实际包内 Qt/TSK 完成清空回收站阶段的只读虚拟卷验收。221 项管理员测试无失败、无跳过；没有发布新的 GitHub Release。[本轮验收及包摘要](milestones/09-live-volume-validation.md)
+上一轮本地包 `ShiHui-0.2.0-volume-validation-windows-x64` 包含直接卷验收脚本、Python 辅助工具和重新挂载盘符修复。包内 398 个文件清单及 147 个 PE 检查通过，实际包内 Qt/TSK 完成清空回收站阶段的只读虚拟卷验收。该轮 221 项管理员测试无失败、无跳过。[历史验收及包摘要](milestones/09-live-volume-validation.md)
+
+当前候选包为 `ShiHui-0.2.1rc1-windows-x64`，补齐取消与权限处理、断连/满盘报告、窗口缩放和原生验收工具，并附完整文档。238 项管理员测试全部通过。包内运行时与发布 ZIP 的最终校验另存到验收材料，不修改已生成的包。尚未发布新的 GitHub Release。[本轮交付状态](milestones/10-software-completion.md)

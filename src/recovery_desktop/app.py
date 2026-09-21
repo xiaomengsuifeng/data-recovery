@@ -109,8 +109,14 @@ class RecoveryWindow(QMainWindow):
         self.sources = []
         self._closing = False
         self.setWindowTitle("拾回 · 免费文件恢复")
-        self.resize(1240, 830)
-        self.setMinimumSize(1020, 720)
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        self._compact = bool(available and (available.width() < 1200 or available.height() < 800))
+        self._narrow = bool(available and available.width() < 1000)
+        self.setMinimumSize(min(820, available.width() - 24) if available else 820,
+                            min(480, available.height() - 48) if available else 480)
+        self.resize(min(1240, available.width() - 24) if available else 1240,
+                    min(830, available.height() - 48) if available else 830)
         self._build()
 
     def backend(self):
@@ -124,35 +130,37 @@ class RecoveryWindow(QMainWindow):
         layout.setSpacing(0)
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(204)
+        sidebar.setFixedWidth(168 if self._compact else 204)
         nav = QVBoxLayout(sidebar)
-        nav.setContentsMargins(22, 32, 22, 25)
+        nav.setContentsMargins(12 if self._compact else 22, 24, 12 if self._compact else 22, 20)
         nav.setSpacing(10)
         brand = label("拾回", "title")
         brand.setStyleSheet("font-size: 28px; color: white;")
         nav.addWidget(brand)
-        nav.addWidget(label("让重要的文件回到身边"))
-        nav.addSpacing(42)
+        if not self._narrow:
+            nav.addWidget(label("让重要的文件回到身边"))
+        nav.addSpacing(12 if self._narrow else 42)
         self.home_button = button("＋  开始恢复", self.go_home)
         self.open_button = button("↗  打开扫描记录", self.open_session)
         self.help_button = button("?   使用说明", self.show_help)
         for b in (self.home_button, self.open_button, self.help_button):
             nav.addWidget(b)
         nav.addStretch()
-        nav.addWidget(label("本地处理 · 无需账号"))
-        nav.addWidget(label("核心恢复永久免费"))
-        nav.addSpacing(14)
-        nav.addWidget(label(f"桌面测试版  {__version__}"))
+        if not self._narrow:
+            nav.addWidget(label("本地处理 · 无需账号"))
+            nav.addWidget(label("核心恢复永久免费"))
+            nav.addSpacing(14)
+        nav.addWidget(label(f"候选版  {__version__}", wrap=True))
         layout.addWidget(sidebar)
         body = QVBoxLayout()
-        body.setContentsMargins(32, 30, 32, 22)
+        body.setContentsMargins(16 if self._compact else 32, 20, 16 if self._compact else 32, 16)
         self.pages = QStackedWidget()
         body.addWidget(self.pages, 1)
         self.task_frame = QFrame()
         tl = QVBoxLayout(self.task_frame)
         tl.setContentsMargins(0, 14, 0, 0)
         top = QHBoxLayout()
-        self.task_label = label("准备就绪", "muted")
+        self.task_label = label("准备就绪", "muted", True)
         self.cancel_button = button("取消任务", self.cancel_task)
         self.cancel_button.setEnabled(False)
         top.addWidget(self.task_label, 1)
@@ -165,6 +173,8 @@ class RecoveryWindow(QMainWindow):
         tl.addWidget(self.progress_bar)
         body.addWidget(self.task_frame)
         layout.addLayout(body, 1)
+        # Page contents scroll independently; navigation and cancellation stay
+        # visible even on a small logical desktop at 200% scaling.
         self.setCentralWidget(outer)
         self._home_page()
         self._results_page()
@@ -197,11 +207,11 @@ class RecoveryWindow(QMainWindow):
         self.partition = QComboBox()
         self.partition.addItem("选择来源后，自动识别 NTFS 分区", None)
         c.addWidget(self.partition)
-        self.deep_png = QCheckBox("深度查找 PNG 图片（较慢，原名与目录未知，仅镜像）")
-        self.deep_png.setToolTip("额外检查未分配空间中的连续 PNG，最大 256 MiB。可能与普通结果重复。")
+        self.deep_png = QCheckBox("深度查找 PNG 图片（仅镜像）")
+        self.deep_png.setToolTip("较慢；原名与目录未知。额外检查未分配空间中的连续 PNG，最大 256 MiB，可能与普通结果重复。")
         c.addWidget(self.deep_png)
-        self.deep_log = QCheckBox("查找旧日志中的文件（实验功能，仅镜像，片段会单独标记）")
-        self.deep_log.setToolTip("利用旧 NTFS 文件记录查找数据。仅支持部分日志格式；历史名称和内容仍需核对。")
+        self.deep_log = QCheckBox("查找旧日志中的文件（实验功能，仅镜像）")
+        self.deep_log.setToolTip("利用旧 NTFS 文件记录查找数据。仅支持部分日志格式；片段单独标记，历史名称和内容仍需核对。")
         c.addWidget(self.deep_log)
         c.addWidget(label("2  选择工作与保存位置", "title"))
         row = QHBoxLayout()
@@ -318,14 +328,21 @@ class RecoveryWindow(QMainWindow):
         v.addWidget(self.empty_label)
         foot = QHBoxLayout()
         self.selected_label = label("尚未选择文件", "muted")
-        foot.addWidget(self.selected_label, 1)
         self.details_button = button("查看扫描说明", self.scan_details)
+        if self._narrow:
+            v.addWidget(self.selected_label)
+        else:
+            foot.addWidget(self.selected_label, 1)
         foot.addWidget(self.details_button)
         self.recover_button = button("保存选中的文件  →", self.start_recover, True)
         self.recover_button.setEnabled(False)
         foot.addWidget(self.recover_button)
         v.addLayout(foot)
-        self.pages.addWidget(page)
+        self.results_scroll = QScrollArea()
+        self.results_scroll.setWidgetResizable(True)
+        self.results_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.results_scroll.setWidget(page)
+        self.pages.addWidget(self.results_scroll)
 
     def _complete_page(self):
         page = QWidget()
@@ -351,7 +368,11 @@ class RecoveryWindow(QMainWindow):
         row.addWidget(button("打开保存位置", self.open_output, True))
         c.addLayout(row)
         v.addWidget(frame, 1)
-        self.pages.addWidget(page)
+        self.complete_scroll = QScrollArea()
+        self.complete_scroll.setWidgetResizable(True)
+        self.complete_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.complete_scroll.setWidget(page)
+        self.pages.addWidget(self.complete_scroll)
 
     def run_task(self, message, operation, success):
         if self.worker is not None:
@@ -616,18 +637,31 @@ class RecoveryWindow(QMainWindow):
 
     def show_recovery(self, report):
         status = report["status"]
-        self.complete_title.setText("保存完成" if status == "completed" else "保存已取消" if status == "cancelled" else "来源发生变化")
+        incomplete = report['partial_count'] + report['failed_count'] + report['skipped_count']
+        pending = max(0, report.get('selected_count', 0) - report.get('processed_count', 0))
+        title = ("保存已取消" if status == "cancelled" else
+                 "来源变化或无法读取" if status == "source_changed" else
+                 "保存未全部完成" if incomplete or pending else "保存完成")
+        self.complete_title.setText(title)
         self.complete_counts.setText(f"已导出 {report['exported_unverified_count']} 个   ·   部分 {report['partial_count']} 个   ·   未完成 {report['failed_count'] + report['skipped_count']} 个")
         self.complete_info.setText(str(self.last_output))
         states = {"exported_unverified": "已导出 · 待检查内容", "partial": "部分结果", "failed": "未完成", "skipped": "已跳过"}
         lines = []
+        if report.get("source_error"):
+            lines.append("来源检查：" + report["source_error"])
+        if report.get("report_warning"):
+            lines.append(report["report_warning"] + "\n报告：" + report["report_path"])
+        if pending:
+            lines.append(f"还有 {pending} 个选中文件未处理。已有结果保留，可重新选择这些文件保存到新目录。")
         for item in report["results"][:500]:
             lines.append(f"{states[item['status']]}  |  {item['original_path'] or item['observed_path']}\n    {item.get('saved_path') or '未保存'}")
+            if item['status'] != 'exported_unverified' and item.get('warnings'):
+                lines.append("    原因：" + "；".join(str(w) for w in item['warnings'])[:4000])
         if len(report["results"]) > 500:
             lines.append("界面显示前 500 项，完整结果见 recovery.json。")
         self.complete_text.setPlainText("\n\n".join(lines))
         self.pages.setCurrentIndex(2)
-        self.task_label.setText("恢复报告已保存在结果文件夹")
+        self.task_label.setText("恢复报告已保存在扫描记录目录" if report.get("report_path") else "恢复报告已保存在结果文件夹")
 
     def open_output(self):
         if self.last_output:
@@ -651,7 +685,11 @@ class RecoveryWindow(QMainWindow):
             else:
                 args = ["-B", "-m", "recovery_desktop"]
             if self.tsk_bin:
-                args += ["--tsk-bin", str(self.tsk_bin)]
+                args += ["--tsk-bin", str(Path(self.tsk_bin).resolve())]
+            if self.session:
+                args += ["--session", str(self.session.resolve())]
+            if self.workspace.text():
+                args += ["--workspace", str(Path(self.workspace.text()).resolve())]
             elevate(args)
             self.close()
         except Exception as exc:
@@ -670,6 +708,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="拾回：免费 NTFS 文件恢复")
     parser.add_argument("--tsk-bin", type=Path)
     parser.add_argument("--session", type=Path)
+    parser.add_argument("--workspace", type=Path)
     args = parser.parse_args(argv)
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("拾回")
@@ -677,6 +716,8 @@ def main(argv=None):
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE)
     window = RecoveryWindow(args.tsk_bin)
+    if args.workspace:
+        window.workspace.setText(str(args.workspace))
     if args.session:
         try:
             window.load_report(args.session, read_json(args.session / "session.json"))

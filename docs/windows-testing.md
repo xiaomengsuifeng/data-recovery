@@ -1,12 +1,12 @@
 # 在 Windows 11 生成并验证 NTFS 恢复样本
 
-状态：2026-09-14 已在管理员 Windows 11 会话中实际运行 VHD 生成、直接删除、Windows Shell 回收与清空，并用真实 TSK 对照删除前原件。直接删除阶段为 4/4，清空后的回收站目标为 4/4；较早直接删除的记录被后续操作复用，组合阶段为 4/8，整轮保持 `incomplete`。142 项自动测试全部通过，无跳过。材料只有合成 TXT 和 PNG；Office、真实拍摄照片、物理介质和系统盘行为仍需要后续验证。
+样本生成状态：2026-09-14 已在管理员 Windows 11 会话中实际运行 VHD 生成、直接删除、Windows Shell 回收与清空，并用真实 TSK 对照删除前原件。直接删除阶段为 4/4，清空后的回收站目标为 4/4；较早直接删除的记录被后续操作复用，普通元数据扫描的组合阶段为 4/8，整轮保持 `incomplete`。当前 0.2.1rc1 的 238 项管理员自动测试全部通过，无跳过，见[软件收尾记录](milestones/10-software-completion.md)。材料只有合成 TXT 和 PNG；Office、真实拍摄照片、物理介质和系统盘行为仍需要后续验证。
 
 请使用当前源码或本轮重新构建的便携包。原始 0.2.0 发布包未包含新增入口、脚本兼容性、中文解码和导出目录权限修复；早先构建的 fixture-validation 本地包也需要更新。
 
 ## 脚本会做什么
 
-[`New-RecoveryFixture.ps1`](../tools/windows/New-RecoveryFixture.ps1) 在指定父目录下建立全新的 `ntfs-fixture-<随机ID>` 子目录，然后：
+`New-RecoveryFixture.ps1` 在指定父目录下建立全新的 `ntfs-fixture-<随机ID>` 子目录，然后：
 
 1. 用 Windows 自带 `diskpart` 创建一个 **128 MiB、fixed 类型的新 VHD**。
 2. 通过 `Get-DiskImage → Get-Disk` 确认它是新出现、未初始化、非系统/启动盘的虚拟磁盘，只在该盘创建 NTFS 分区。盘符从尚未使用的 D–Z 中选取。

@@ -1,16 +1,17 @@
 # 拾回 · 免费数据恢复
 
-面向 Windows 普通用户的本地 NTFS 误删文件恢复工具。当前版本 **0.2.0 桌面测试版**，提供来源选择、扫描、筛选、预览、批量导出、任务取消和结果报告；开源、无需账号、无恢复容量收费门槛。
+面向 Windows 普通用户的本地 NTFS 误删文件恢复工具。当前版本 **0.2.1rc1 软件候选版**，提供来源选择、扫描、筛选、预览、批量导出、任务取消和结果报告；开源、无需账号、无恢复容量收费门槛。
 
 主要解决直接删除、误删文件夹，以及清空回收站后仍留有可读取记录的文件恢复。文件是否能恢复取决于残留数据；不把候选数量或预览成功当作恢复成功率。
 
 ## Windows 使用
 
-从 [GitHub Releases](https://github.com/xiaomengsuifeng/data-recovery/releases/tag/v0.2.0) 下载 `ShiHui-0.2.0-windows-x64.zip`，完整解压后双击 `Start-ShiHui.cmd`。便携包自带 Python、Qt 和 TSK，无需安装开发环境。直接扫描磁盘需要管理员权限，软件、工作目录和输出需位于另一块物理磁盘。
+当前源码构建的候选包为 `ShiHui-0.2.1rc1-windows-x64.zip`，完整解压后双击 `Start-ShiHui.cmd`。便携包自带 Python、Qt 和 TSK，无需安装开发环境。直接扫描磁盘需要管理员权限，软件、工作目录和输出需位于另一块物理磁盘。
 
-这是预发布测试版，尚未完成全部 Windows 真机验收。GitHub 自动生成的 “Source code” 压缩包仅包含项目源码。当前源码另包含 Windows 验收修复、可选 PNG 深度扫描及旧 NTFS 日志恢复，原始 0.2.0 Release 尚未包含这些更新。
+首版 NTFS 范围的软件开发和本地自动回归已完成，专用物理介质验收仍待补充。0.2.1rc1 尚未上传发布；[GitHub Releases 中的原始 0.2.0](https://github.com/xiaomengsuifeng/data-recovery/releases/tag/v0.2.0) 不含后续 PNG、旧日志及软件收尾更新。GitHub 自动生成的 “Source code” 压缩包仅包含项目源码。
 
 - [桌面使用说明、支持范围和常见问题](docs/desktop-guide.md)
+- [0.2.1rc1 软件收尾、验证方法与交付边界](docs/milestones/10-software-completion.md)
 - [0.2.0 开发验收与验证边界](docs/milestones/02-desktop-test-release.md)
 - [Windows 隔离样本生成与真机验收](docs/windows-testing.md)
 - [许可和对应源码说明](THIRD_PARTY_NOTICES.md)
@@ -32,7 +33,7 @@ PYTHONPATH=src QT_QPA_PLATFORM=offscreen .venv/bin/python -B -m unittest discove
 
 [开发命令、报告格式、可复现演示和 Windows 打包](docs/development.md)。Windows 包由固定上游归档离线组装，`tools/runtime-lock.json` 锁定下载地址、长度、SHA-256 和实际选用模块；包内附有对应开源组件源码与许可。
 
-当前自动测试共 221 项，管理员环境全部通过、无跳过，包含直接卷验收工具、扩展样本、旧日志、片段、内容扫描、Qt 和符号链接用例。NIST DFR-01 镜像另用于原生 Qt 和真实 TSK 的桌面回归，其参考摘要来自删除后镜像的文档指定区域。[NIST 样本证据说明](tests/integration/fixture-source.md)
+当前自动测试共 238 项，管理员环境全部通过、无跳过，包含直接卷验收工具、扩展样本、旧日志、片段、内容扫描、Qt、符号链接，以及取消、断连、目标满盘和报告写入失败用例。原生窗口验收工具支持 100%、125%、150%、200% 缩放和独立原件核验。NIST DFR-01 镜像另用于原生 Qt 和真实 TSK 的桌面回归，其参考摘要来自删除后镜像的文档指定区域。[NIST 样本证据说明](tests/integration/fixture-source.md)
 
 隔离样本已保存 9 个删除前原件并生成四阶段镜像。同时启用 PNG 和旧日志扫描后，阶段内容匹配为 0/0、4/4、2/4、6/8，原路径匹配为 0、4、2、6。另导出 1 份文字片段，不计入完整恢复；仍有 2 个 TXT 未完整恢复，整轮保持 `incomplete`。另一独立生成的同类 Windows 样本得到相同计数。[使用方法](docs/windows-testing.md) · [验收报告](docs/milestones/07-ntfs-log-recovery.md)
 
@@ -47,7 +48,7 @@ PYTHONPATH=src QT_QPA_PLATFORM=offscreen .venv/bin/python -B -m unittest discove
 - 镜像可选旧 NTFS 日志恢复，支持部分日志格式中的非驻留数据及复用记录；片段单独标记、保存和统计，历史名称与内容仍需核对。
 - 暂无 FAT/exFAT/APFS、其他格式或碎片文件的内容扫描、BitLocker/EFS 解密、坏盘采集、断点续扫和 TRIM 逆转。
 - 镜像模式在关键操作前后比较完整 SHA-256；真实卷只能核对设备身份，Windows 可能继续改变卷内容。
-- 清空回收站、追加写入和只读虚拟卷的直接访问已完成隔离 VHD 实测；更多分配布局、可写物理介质、应用 UAC 取消、读取中断连及不同 DPI 仍需验证。
+- 清空回收站、追加写入和只读虚拟卷的直接访问已完成隔离 VHD 实测；软件故障分支有自动回归。可写物理介质、物理拔盘、真实 UAC 取消及跨显示器 DPI 切换仍待外部环境验收。
 
 ## 产品与调研
 
@@ -58,7 +59,7 @@ PYTHONPATH=src QT_QPA_PLATFORM=offscreen .venv/bin/python -B -m unittest discove
 - [公平对照测试方案](docs/research/benchmark-plan.md)
 - [历史 0.1 原型验收](docs/milestones/01-ntfs-prototype.md)
 
-研究核查日期为 2026-09-12，桌面版本更新于 2026-09-14。尚未完成竞品实测，不宣称恢复率领先。当前价值是免费导出、清楚的本地流程、可审计的结果与开源实现；算法优势要通过独立样本验证。
+研究核查日期为 2026-09-12，桌面版本更新于 2026-09-21。尚未完成竞品实测，不宣称恢复率领先。当前价值是免费导出、清楚的本地流程、可审计的结果与开源实现；算法优势要通过独立样本验证。
 
 ## 开源许可与参与
 
