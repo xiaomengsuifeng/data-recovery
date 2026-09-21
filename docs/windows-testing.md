@@ -1,6 +1,6 @@
-# 在 Windows 11 生成并验证 NTFS 恢复样本
+# 在 Windows 11 生成并验证 NTFS / exFAT 恢复样本
 
-样本生成状态：2026-09-14 已在管理员 Windows 11 会话中实际运行 VHD 生成、直接删除、Windows Shell 回收与清空，并用真实 TSK 对照删除前原件。直接删除阶段为 4/4，清空后的回收站目标为 4/4；较早直接删除的记录被后续操作复用，普通元数据扫描的组合阶段为 4/8，整轮保持 `incomplete`。当前 0.2.1rc1 的 238 项管理员自动测试全部通过，无跳过，见[软件收尾记录](milestones/10-software-completion.md)。材料只有合成 TXT 和 PNG；Office、真实拍摄照片、物理介质和系统盘行为仍需要后续验证。
+样本生成状态：2026-09-14 已在管理员 Windows 11 会话中实际运行 VHD 生成、直接删除、Windows Shell 回收与清空，并用真实 TSK 对照删除前原件。直接删除阶段为 4/4，清空后的回收站目标为 4/4；较早直接删除的记录被后续操作复用，普通元数据扫描的组合阶段为 4/8，整轮保持 `incomplete`。当前 0.3.0rc1 的 277 项管理员自动测试全部通过，无跳过，见[扩展软件记录](milestones/11-extended-software.md)。材料只有合成 TXT 和 PNG；Office、真实拍摄照片、物理介质和系统盘行为仍需要后续验证。
 
 请使用当前源码或本轮重新构建的便携包。原始 0.2.0 发布包未包含新增入口、脚本兼容性、中文解码和导出目录权限修复；早先构建的 fixture-validation 本地包也需要更新。
 
@@ -208,3 +208,19 @@ python -m recovery_core verify /path/to/recovered/direct-01 --manifest /path/to/
 本机已验证 diskpart/Storage、盘符重新挂载、卷刷新/卸载、Shell 回收与清空、`$I` 关联及合成目标的实际恢复。导出的镜像在扫描/恢复前后摘要一致，测试 VHD 最终全部卸载，已有磁盘身份和布局清单未变。当前配置为 Windows 11 10.0.26200、Windows PowerShell 5.1.26100.9444；其他 Windows 配置和回收站设置仍需覆盖。管理员进程创建的恢复目录已验证可由同一普通用户重新打开。
 
 该材料只代表受控的小型逻辑 NTFS 样本。它没有制造保证的磁盘碎片或特定 MFT 驻留布局，没有测试物理 SSD 删除/TRIM、坏盘、格式化、压缩/加密文件，也没有测量成熟产品的恢复率。不同阶段之间 Windows 自身的元数据操作可能影响此前删除文件的残留，因此每个阶段都保留独立镜像和原件真值。
+
+## exFAT、采集与续接验收
+
+0.3.0rc1 新增 `New-RecoveryFixture.ps1 -FileSystem exFAT -Profile expanded`。仍仅格式化脚本新建的隔离 VHD；exFAT 生成删除前和直接删除后两个阶段，禁止非零 `WritePressureMiB`。不把 NTFS 回收站行为套用到 exFAT。最新实际样本 26 个直接删除目标的内容、名称和路径均匹配。
+
+```powershell
+.\tools\windows\New-RecoveryFixture.ps1 -OutputParent D:\Fixtures -FileSystem exFAT -Profile expanded
+.\.venv\Scripts\python.exe -B -m recovery_core validate-fixture D:\Fixtures\exfat-fixture-ID --output D:\Results\exfat-new --deep-png --tsk-bin D:\Tools\tsk\bin
+.\tools\windows\Invoke-LiveVolumeValidation.ps1 -Fixture D:\Fixtures\exfat-fixture-ID -OutputParent D:\Results -TskBin D:\Tools\tsk\bin
+```
+
+只读卷验收入口也支持 exFAT。它创建只读 VHD 副本，核对卷、整盘和原件身份，通过桌面选择物理设备采集整盘；分区采集在完成 16 MiB 后取消，再继续。整个磁盘摘要与独立 raw 镜像一致，分区摘要与 raw 中相应范围一致，最终卸载且原有磁盘/分区清单不变。没有读取用户 C/D 盘的数据区域做恢复实验。
+
+`tools/run_extended_acceptance.py --image <合成 exFAT 镜像> --offset 128 --output <全新目录> --tsk-bin <TSK目录>` 在新副本的空闲零区域散放独立 Qt 编码的 JPEG，两段之间留一个簇间隙；用真实 TSK、扫描取消/续接和原生 Qt 预览导出核对原件。该测试是人为碎片实验，不是实际 Windows 碎片删除操作。工具还执行桌面文件镜像采集和载入。便携包工具位于 `validation/`，用包内 Python 并传 `--installed-runtime`，报告记录实际模块路径。
+
+坏区、超时、权限失败、源变化、进度损坏、目标篡改和并发续接由自动故障注入验证；不等同于真实坏盘或物理拔盘实测。源材料、输出及失败尝试均保留在验收目录，禁止以测试通过推断普遍恢复率。

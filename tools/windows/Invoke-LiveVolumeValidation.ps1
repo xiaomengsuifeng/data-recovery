@@ -109,10 +109,10 @@ try {
     $volume = $part | Get-Volume
     $mount = [string]$part.DriveLetter + ':\'
     $disk = Get-DiskImage -ImagePath $copy | Get-Disk
-    if (-not $disk.IsReadOnly -or $volume.FileSystem -ne 'NTFS' -or $volume.FileSystemLabel -ne $plan.label -or
+    if (-not $disk.IsReadOnly -or $volume.FileSystem -ne $plan.filesystem -or $volume.FileSystemLabel -ne $plan.label -or
         [IO.File]::ReadAllText((Join-Path $mount $plan.marker)) -ne $plan.fixture_id) { throw 'Read-only fixture marker or identity differs.' }
     $source = @{ kind='windows_volume'; mount=$mount; path=('\\.\' + $mount.Substring(0,2))
-        guid=[string]$volume.UniqueId; label=[string]$volume.FileSystemLabel; size=[long]$volume.Size
+        guid=[string]$volume.UniqueId; label=[string]$volume.FileSystemLabel; size=[long]$parts[0].Size
         disk_numbers=@([int]$disk.Number); disk_ids=@([string]$disk.UniqueId); sector_size=512; system=$false }
     [IO.File]::WriteAllText((Join-Path $material 'mount.json'),
         (@{ schema_version=1; read_only=$true; copy=$copy; source=$source } | ConvertTo-Json -Depth 8), $utf8)

@@ -84,7 +84,7 @@ def build(cache: Path, output: Path) -> Path:
     (output/'使用说明.md').write_text(
         '# 拾回使用说明\n\n双击 `Start-ShiHui.cmd` 启动。\n\n'
         '- [桌面操作、支持范围与故障处理](docs/desktop-guide.md)\n'
-        '- [候选版交付与验收边界](docs/milestones/10-software-completion.md)\n'
+        '- [候选版交付与验收边界](docs/milestones/11-extended-software.md)\n'
         '- [Windows 验证工具使用方法](docs/windows-testing.md)\n', encoding='utf-8')
     shutil.copy2(ROOT/'tools/runtime-lock.json',output/'runtime-lock.json')
     (output/'validation').mkdir()
@@ -93,6 +93,7 @@ def build(cache: Path, output: Path) -> Path:
     shutil.copy2(ROOT/'tools/windows/Invoke-LiveVolumeValidation.ps1',output/'validation/Invoke-LiveVolumeValidation.ps1')
     shutil.copy2(ROOT/'tools/live_volume_validation.py',output/'validation/live_volume_validation.py')
     shutil.copy2(ROOT/'tools/run_desktop_acceptance.py',output/'validation/run_desktop_acceptance.py')
+    shutil.copy2(ROOT/'tools/run_extended_acceptance.py',output/'validation/run_extended_acceptance.py')
     (output/'validation/windows-testing.md').write_text(
         '# Windows 验证工具\n\n[完整使用方法、样本范围和验收说明](../docs/windows-testing.md)\n',
         encoding='utf-8')
@@ -116,7 +117,7 @@ def build(cache: Path, output: Path) -> Path:
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cache',type=Path,default=ROOT/'artifacts/downloads')
-    parser.add_argument('--output',type=Path,default=ROOT/'dist/ShiHui-0.2.1rc1-windows-x64')
+    parser.add_argument('--output',type=Path,default=ROOT/'dist/ShiHui-0.3.0rc1-windows-x64')
     args=parser.parse_args()
     package=build(args.cache,args.output)
     print(json.dumps({'package':str(package),'bytes':package.stat().st_size,'sha256':sha(package)},indent=2))

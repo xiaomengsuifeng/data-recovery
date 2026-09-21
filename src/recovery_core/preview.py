@@ -82,8 +82,10 @@ def preview(session: Path, candidate_id: str, backend) -> dict:
         data = output.getvalue()
     check_identity(report["source"])
     result = describe(data, item["original_path"] or item["observed_path"])
-    if item.get("recovery_method") == "png_carving":
+    if item.get("recovery_method") in ("png_carving", "jpeg_carving"):
         result["note"] = "深度扫描生成名称，原名与目录未知。 " + result["note"]
+        if item.get("carving", {}).get("reconstructed"):
+            result["note"] = "JPEG 碎片推测重组，可能存在错误拼接，请核对图片内容。 " + result["note"]
     if item.get("recovery_method") == "ntfs_log":
         result["note"] = "旧日志关联的历史文件，内容仍需核对。 " + result["note"]
         if item["content_status"] == "fragment":

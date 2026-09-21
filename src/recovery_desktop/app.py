@@ -14,15 +14,16 @@ from PySide6.QtGui import QDesktopServices, QImageReader, QPixmap, QFont
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QLineEdit, QFileDialog, QComboBox, QStackedWidget, QTableView,
     QHeaderView, QAbstractItemView, QSplitter, QPlainTextEdit, QProgressBar, QFrame,
-    QMessageBox, QCheckBox, QScrollArea)
+    QMessageBox, QCheckBox, QScrollArea, QSpinBox)
 
 from recovery_core import __version__
 from recovery_core.common import RecoveryError, read_json
 from recovery_core.partitions import inspect_image
-from recovery_core.service import scan, recover, _validate_candidates
+from recovery_core.service import scan, resume_scan, recover, _validate_candidates
+from recovery_core.acquisition import acquire, resume_acquisition
 from recovery_core.preview import preview
 from recovery_core.tsk import Tsk
-from recovery_core.windows import VolumeSource, list_volumes, elevate
+from recovery_core.windows import VolumeSource, DiskSource, list_volumes, list_disks, elevate
 from .model import CandidateModel, CandidateFilter, filename, format_size
 from .worker import Worker
 
@@ -106,6 +107,7 @@ class RecoveryWindow(QMainWindow):
         self.session = None
         self.report = None
         self.last_output = None
+        self.last_acquisition = None
         self.sources = []
         self._closing = False
         self.setWindowTitle("拾回 · 免费文件恢复")
@@ -142,8 +144,9 @@ class RecoveryWindow(QMainWindow):
         nav.addSpacing(12 if self._narrow else 42)
         self.home_button = button("＋  开始恢复", self.go_home)
         self.open_button = button("↗  打开扫描记录", self.open_session)
+        self.resume_button = button("↻  继续中断任务", self.open_progress)
         self.help_button = button("?   使用说明", self.show_help)
-        for b in (self.home_button, self.open_button, self.help_button):
+        for b in (self.home_button, self.open_button, self.resume_button, self.help_button):
             nav.addWidget(b)
         nav.addStretch()
         if not self._narrow:
@@ -179,13 +182,14 @@ class RecoveryWindow(QMainWindow):
         self._home_page()
         self._results_page()
         self._complete_page()
+        self._acquisition_page()
 
     def _home_page(self):
         page = QWidget()
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(18)
-        v.addWidget(label("FILE RECOVERY  /  NTFS", "eyebrow"))
+        v.addWidget(label("FILE RECOVERY  /  NTFS · exFAT", "eyebrow"))
         v.addWidget(label("找回误删的重要文件", "hero"))
         v.addWidget(label("清空回收站、直接删除或误删文件夹，从文件原来的位置开始查找。", "muted", True))
         v.addSpacing(6)
@@ -193,7 +197,7 @@ class RecoveryWindow(QMainWindow):
         c.addWidget(label("1  选择文件原来所在的位置", "title"))
         row = QHBoxLayout()
         self.mode = QComboBox()
-        self.mode.addItems(["镜像文件", "Windows 磁盘"])
+        self.mode.addItems(["镜像文件", "Windows 卷", "整盘镜像采集"])
         self.mode.currentIndexChanged.connect(self.mode_changed)
         self.mode.setFixedWidth(180)
         row.addWidget(self.mode)
@@ -205,11 +209,20 @@ class RecoveryWindow(QMainWindow):
         row.addWidget(self.source_button)
         c.addLayout(row)
         self.partition = QComboBox()
-        self.partition.addItem("选择来源后，自动识别 NTFS 分区", None)
+        self.partition.addItem("选择来源后，自动识别 NTFS / exFAT 分区", None)
         c.addWidget(self.partition)
         self.deep_png = QCheckBox("深度查找 PNG 图片（仅镜像）")
         self.deep_png.setToolTip("较慢；原名与目录未知。额外检查未分配空间中的连续 PNG，最大 256 MiB，可能与普通结果重复。")
         c.addWidget(self.deep_png)
+        self.deep_jpeg = QCheckBox("深度查找 JPEG 照片（仅镜像）")
+        self.deep_jpeg.setToolTip("检查未分配空间中的 JPEG，最大 64 MiB / 4000 万像素；原名和目录未知。")
+        c.addWidget(self.deep_jpeg)
+        self.reassemble_jpeg = QCheckBox("尝试 JPEG 碎片重组（较慢，需逐张核对）")
+        self.reassemble_jpeg.setToolTip("仅基线 JPEG，有界搜索最多 32 段或两段拼接，最大 8 MiB。存在歧义时跳过；不是所有碎片都能重组。")
+        self.reassemble_jpeg.setEnabled(False)
+        self.deep_jpeg.toggled.connect(lambda checked: self.reassemble_jpeg.setEnabled(checked and not self.worker))
+        self.deep_jpeg.toggled.connect(lambda checked: self.reassemble_jpeg.setChecked(False) if not checked else None)
+        c.addWidget(self.reassemble_jpeg)
         self.deep_log = QCheckBox("查找旧日志中的文件（实验功能，仅镜像）")
         self.deep_log.setToolTip("利用旧 NTFS 文件记录查找数据。仅支持部分日志格式；片段单独标记，历史名称和内容仍需核对。")
         c.addWidget(self.deep_log)
@@ -226,11 +239,26 @@ class RecoveryWindow(QMainWindow):
         self.live_notice = label("运行中的 Windows 会持续写入系统盘，部分删除内容可能已被覆盖或清理。恢复工具无法保证找回所有文件。", "notice", True)
         self.live_notice.hide()
         c.addWidget(self.live_notice)
+        capture_options = QHBoxLayout()
+        capture_options.addWidget(label("镜像采集：读取等待上限（秒）"))
+        self.read_timeout = QSpinBox()
+        self.read_timeout.setRange(1, 300)
+        self.read_timeout.setValue(30)
+        capture_options.addWidget(self.read_timeout)
+        capture_options.addWidget(label("坏区重试次数"))
+        self.read_retries = QSpinBox()
+        self.read_retries.setRange(0, 10)
+        self.read_retries.setValue(1)
+        capture_options.addWidget(self.read_retries)
+        capture_options.addStretch()
+        c.addLayout(capture_options)
         actions = QHBoxLayout()
         self.admin_button = button("以管理员身份重新启动", self.restart_admin)
         self.admin_button.setVisible(os.name == "nt")
         actions.addWidget(self.admin_button)
         actions.addStretch()
+        self.acquire_button = button("创建只读镜像", self.start_acquisition)
+        actions.addWidget(self.acquire_button)
         self.scan_button = button("开始查找  →", self.start_scan, True)
         actions.addWidget(self.scan_button)
         c.addLayout(actions)
@@ -374,6 +402,28 @@ class RecoveryWindow(QMainWindow):
         self.complete_scroll.setWidget(page)
         self.pages.addWidget(self.complete_scroll)
 
+    def _acquisition_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self.acquisition_title = label("镜像采集结果", "hero")
+        layout.addWidget(self.acquisition_title)
+        self.acquisition_info = label("", "notice", True)
+        layout.addWidget(self.acquisition_info)
+        self.acquisition_text = QPlainTextEdit()
+        self.acquisition_text.setReadOnly(True)
+        layout.addWidget(self.acquisition_text, 1)
+        row = QHBoxLayout()
+        self.retry_acquisition_button = button("继续采集 / 重试坏区", self.retry_acquisition)
+        self.load_acquired_button = button("查找此镜像中的文件", self.load_acquired, True)
+        row.addWidget(self.retry_acquisition_button)
+        row.addWidget(self.load_acquired_button)
+        layout.addLayout(row)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(page)
+        self.pages.addWidget(scroll)
+
     def run_task(self, message, operation, success):
         if self.worker is not None:
             return
@@ -394,13 +444,17 @@ class RecoveryWindow(QMainWindow):
         self.worker.start()
 
     def set_busy(self, busy):
-        for w in (self.home_button, self.open_button, self.source_button, self.workspace_button,
+        for w in (self.home_button, self.open_button, self.resume_button, self.source_button, self.workspace_button,
                   self.scan_button, self.mode, self.partition, self.preview_button, self.recover_button,
-                  self.admin_button, self.back_results):
+                  self.admin_button, self.back_results, self.acquire_button, self.read_timeout, self.read_retries,
+                  self.retry_acquisition_button, self.load_acquired_button):
             w.setEnabled(not busy)
         self.cancel_button.setEnabled(busy)
         self.deep_png.setEnabled(not busy and self.mode.currentIndex() == 0)
         self.deep_log.setEnabled(not busy and self.mode.currentIndex() == 0)
+        self.deep_jpeg.setEnabled(not busy and self.mode.currentIndex() == 0)
+        self.reassemble_jpeg.setEnabled(not busy and self.mode.currentIndex() == 0 and self.deep_jpeg.isChecked())
+        self.scan_button.setEnabled(not busy and self.mode.currentIndex() != 2)
         if not busy:
             self.update_selection()
 
@@ -415,7 +469,8 @@ class RecoveryWindow(QMainWindow):
 
     def on_progress(self, event):
         names = {"hash": "正在校验文件数据", "source": "正在核对来源", "scan": "正在查找删除记录",
-                 "carving": "正在深度查找 PNG",
+                 "carving": "正在深度查找 PNG", "jpeg": "正在深度查找 JPEG",
+                 "acquisition": "正在只读采集镜像", "acquisition_verify": "正在核对采集进度",
                  "directories": "正在查找已删除目录", "recycle": "正在关联回收站记录", "export": "正在保存文件"}
         text = names.get(event["phase"], "正在处理")
         if event.get("message"):
@@ -445,31 +500,36 @@ class RecoveryWindow(QMainWindow):
         self.source_edit.clear()
         self.partition.clear()
         self.partition.addItem("请选择来源", None)
-        live = self.mode.currentIndex() == 1
+        live = self.mode.currentIndex() != 0
         if live:
             self.deep_png.setChecked(False)
             self.deep_log.setChecked(False)
+            self.deep_jpeg.setChecked(False)
         self.deep_png.setEnabled(not live)
         self.deep_log.setEnabled(not live)
+        self.deep_jpeg.setEnabled(not live)
+        self.scan_button.setEnabled(self.mode.currentIndex() != 2)
         self.live_notice.setVisible(live)
         self.source_button.setText("刷新磁盘" if live else "选择镜像")
-        self.source_edit.setPlaceholderText("选择下方的 NTFS 磁盘" if live else "选择 .img、.dd 或 .raw 镜像")
+        self.source_edit.setPlaceholderText("选择下方的源设备" if live else "选择 .img、.dd 或 .raw 镜像")
         if live:
             self.choose_source()
 
     def choose_source(self):
-        if self.mode.currentIndex() == 1:
+        if self.mode.currentIndex() != 0:
             if os.name != "nt":
                 self.show_error("当前为非 Windows 系统，可使用镜像恢复。直接磁盘扫描在 Windows 版提供。")
                 return
             def loaded(rows):
                 self.partition.clear()
                 for row in rows:
-                    self.partition.addItem(f"{row['mount']}  {row['label'] or '本地磁盘'}  ·  {format_size(row['size'])}", row)
-                self.task_label.setText(f"找到 {len(rows)} 个 NTFS 卷")
+                    identifier = row.get("mount") or f"磁盘 {row['number']}"
+                    self.partition.addItem(f"{identifier}  {row['label'] or '本地磁盘'}  ·  {format_size(row['size'])}" +
+                                           (" · 系统盘" if row.get("system") else ""), row)
+                self.task_label.setText(f"找到 {len(rows)} 个来源")
                 if not rows:
-                    self.partition.addItem("没有可用的 NTFS 卷", None)
-            self.run_task("正在识别磁盘…", list_volumes, loaded)
+                    self.partition.addItem("没有可用来源", None)
+            self.run_task("正在识别磁盘…", list_disks if self.mode.currentIndex() == 2 else list_volumes, loaded)
         else:
             path, _ = QFileDialog.getOpenFileName(self, "选择 raw 镜像", "", "Raw 镜像 (*.img *.raw *.dd)")
             if path:
@@ -481,7 +541,7 @@ class RecoveryWindow(QMainWindow):
         def loaded(rows):
             for row in rows:
                 self.partition.addItem(f"{row['label']} · {format_size(row['size'])}", row)
-            self.task_label.setText(f"已识别 {len(rows)} 个 NTFS 分区")
+            self.task_label.setText(f"已识别 {len(rows)} 个 NTFS / exFAT 分区")
         self.run_task("正在识别镜像分区…", lambda: inspect_image(path), loaded)
 
     def choose_workspace(self):
@@ -495,8 +555,8 @@ class RecoveryWindow(QMainWindow):
     def start_scan(self):
         choice = self.partition.currentData()
         work = self.workspace.text()
-        if not choice or not work:
-            self.show_error("请先选择 NTFS 来源和工作文件夹。")
+        if not choice or not work or self.mode.currentIndex() == 2:
+            self.show_error("请选择 NTFS / exFAT 来源和工作文件夹。整盘来源请先创建镜像。")
             return
         source = VolumeSource(choice["mount"]) if self.mode.currentIndex() == 1 else Path(self.source_edit.text())
         destination = self.new_task_folder(work, "scan")
@@ -504,9 +564,14 @@ class RecoveryWindow(QMainWindow):
         sector = choice.get("sector_size", 512)
         deep_png = self.deep_png.isChecked()
         deep_log = self.deep_log.isChecked()
+        deep_jpeg, reassemble = self.deep_jpeg.isChecked(), self.reassemble_jpeg.isChecked()
+        if deep_log and choice.get("filesystem", "").lower() == "exfat":
+            self.show_error("exFAT 没有 NTFS 旧日志，请关闭旧日志选项。")
+            return
         def operation():
             return scan(source, destination, backend=self.backend(), offset=offset, sector_size=sector,
-                        max_candidates=100000, deep_png=deep_png, deep_log=deep_log)
+                        max_candidates=100000, deep_png=deep_png, deep_log=deep_log,
+                        deep_jpeg=deep_jpeg, reassemble_jpeg=reassemble)
         def loaded(report):
             self.load_report(destination, report)
             self.task_label.setText("查找完成，请选择需要保存的文件。")
@@ -532,6 +597,61 @@ class RecoveryWindow(QMainWindow):
                 _validate_candidates(report.get("candidates"))
                 return report
             self.run_task("正在读取扫描记录…", operation, lambda report: self.load_report(Path(path).parent, report))
+
+    def open_progress(self):
+        path, _ = QFileDialog.getOpenFileName(self, "继续中断任务", self.workspace.text(),
+                                             "任务进度 (scan-progress.json acquisition.json)")
+        if path:
+            self.resume_progress(Path(path))
+
+    def resume_progress(self, path):
+        directory = path.parent
+        if path.name == "acquisition.json":
+            self.run_task("正在核对采集数据…", lambda: resume_acquisition(directory), self.show_acquisition)
+        elif path.name == "scan-progress.json":
+            self.run_task("正在核对镜像并继续查找…", lambda: resume_scan(directory, backend=self.backend()),
+                          lambda report: self.load_report(directory, report))
+        else:
+            self.show_error("请选择 scan-progress.json 或 acquisition.json。")
+
+    def start_acquisition(self):
+        work, choice = self.workspace.text(), self.partition.currentData()
+        if not work or (self.mode.currentIndex() == 0 and not self.source_edit.text()) or (self.mode.currentIndex() != 0 and not choice):
+            self.show_error("请先选择采集来源和另一块磁盘上的工作文件夹。")
+            return
+        source = (Path(self.source_edit.text()) if self.mode.currentIndex() == 0 else
+                  VolumeSource(choice["mount"]) if self.mode.currentIndex() == 1 else DiskSource(choice["number"]))
+        destination = self.new_task_folder(work, "image")
+        timeout, retries = self.read_timeout.value(), self.read_retries.value()
+        self.run_task("正在准备只读采集…", lambda: acquire(source, destination, timeout=timeout, retries=retries), self.show_acquisition)
+
+    def show_acquisition(self, report):
+        self.last_acquisition = report
+        completed = report["status"] == "completed"
+        self.acquisition_title.setText("镜像采集完成" if completed else "镜像采集尚有未读数据")
+        self.acquisition_info.setText(
+            f"已读取 {format_size(report.get('good_bytes', 0))} · 坏区 {format_size(report.get('bad_bytes', 0))} · "
+            f"待读取 {format_size(report.get('pending_bytes', 0))}\n"
+            "未读区域以零占位；它们不是恢复出的数据。可继续采集或重试坏区。")
+        lines = [f"镜像：{report['image']}", f"状态：{report['status']}", report.get("error", ""),
+                 f"SHA-256：{report.get('image_sha256', '尚未完成')}", "", "尚未读出的区域（位置 / 字节数 / 状态）："]
+        missing = [r for r in report["ranges"] if r["status"] != "good"]
+        lines.extend(f"{r['offset']:,} / {r['size']:,} / {r['status']}" for r in missing[:500])
+        if len(missing) > 500:
+            lines.append("其余区域见同目录 acquisition.json。")
+        self.acquisition_text.setPlainText("\n".join(lines))
+        self.pages.setCurrentIndex(3)
+        self.task_label.setText("采集记录已保存，可从“继续中断任务”重新打开。")
+
+    def retry_acquisition(self):
+        if self.last_acquisition:
+            self.resume_progress(Path(self.last_acquisition["image"]).parent / "acquisition.json")
+
+    def load_acquired(self):
+        if self.last_acquisition:
+            self.mode.setCurrentIndex(0)
+            self.go_home()
+            self.load_image(Path(self.last_acquisition["image"]))
 
     def filter_changed(self, *_):
         if not hasattr(self, "proxy"):
@@ -676,7 +796,7 @@ class RecoveryWindow(QMainWindow):
             box.exec()
 
     def show_help(self):
-        QMessageBox.information(self, "使用拾回", "1. 选择 NTFS 磁盘或 raw 镜像。\n2. 选择其他磁盘上的工作文件夹。\n3. 开始查找，按名称或类型筛选。\n4. 勾选文件，可先预览，再保存到其他磁盘。\n\n扫描记录可重新打开。所有数据在本地处理。\n直接磁盘扫描需要 Windows 管理员权限。\n\n本版不支持 BitLocker/EFS 解密、坏盘维修或逆转 SSD TRIM。软件不会修复、格式化或写入源卷。\n\n开源许可和第三方声明见软件目录内 LICENSE 与 THIRD_PARTY_NOTICES.md。")
+        QMessageBox.information(self, "使用拾回", "1. 选择 NTFS / exFAT 卷或 raw 镜像。\n2. 选择其他磁盘上的工作文件夹。\n3. 可先创建只读镜像，再查找、预览和保存文件。\n\n镜像支持 PNG / JPEG 深度查找和有界 JPEG 碎片重组。碎片结果可能拼接错误，需逐张核对。\n采集坏区会明确记录并以零占位，可重试读取。\n中断的镜像扫描与采集可从“继续中断任务”打开进度文件。\n直接读取设备需要 Windows 管理员权限。\n\n不支持 BitLocker/EFS 解密、硬件维修、恢复已覆盖数据或逆转 SSD TRIM。软件不会修复、格式化或写入源设备。\n\n开源许可见 LICENSE 与 THIRD_PARTY_NOTICES.md。")
 
     def restart_admin(self):
         try:
@@ -705,7 +825,7 @@ class RecoveryWindow(QMainWindow):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="拾回：免费 NTFS 文件恢复")
+    parser = argparse.ArgumentParser(description="拾回：免费 NTFS / exFAT 文件恢复")
     parser.add_argument("--tsk-bin", type=Path)
     parser.add_argument("--session", type=Path)
     parser.add_argument("--workspace", type=Path)

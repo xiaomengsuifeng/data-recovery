@@ -87,8 +87,10 @@ def main():
         require(abs(window.devicePixelRatioF() - args.scale) < .01, 'Requested Qt scale did not take effect.')
         window.load_image(args.image)
         wait()
-        require(window.partition.count() == 1, 'Expected exactly one synthetic NTFS partition.')
-        reachable(window.scan_button)
+        require(window.partition.count() == 1, 'Expected exactly one synthetic filesystem partition.')
+        for control in (window.deep_jpeg, window.reassemble_jpeg, window.read_timeout,
+                        window.read_retries, window.acquire_button, window.scan_button, window.resume_button):
+            reachable(control)
         window.grab().save(str(output / '01-source.png'))
         window.start_scan()
         wait()
@@ -96,7 +98,7 @@ def main():
         previews = []
         for item in window.model.items:
             suffix = Path(item['original_path'] or item['observed_path']).suffix.lower()
-            kind = 'image' if suffix == '.png' else 'text'
+            kind = 'image' if suffix in ('.png', '.jpg', '.jpeg') else 'text'
             if kind in previews:
                 continue
             window.search.setText(item['original_path'] or item['observed_path'])

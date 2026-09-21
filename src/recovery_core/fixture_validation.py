@@ -1,4 +1,4 @@
-"""Validate staged synthetic NTFS fixtures against their supplied original copies.
+"""Validate staged synthetic NTFS/exFAT fixtures against independent originals.
 
 Only the image and its geometry reach the recovery backend. Original copies,
 stage manifests and recycle-bin ground truth belong to the verification side.
@@ -116,15 +116,19 @@ def load_fixture(fixture: Path) -> dict:
     fixture_id = result.get("fixture_id")
     if not isinstance(fixture_id, str) or not re.fullmatch("[0-9a-f]{32}", fixture_id):
         raise RecoveryError("Invalid fixture ID.")
-    stages = _json_file(root, "stages.json")
-    if (not isinstance(stages, list) or len(stages) not in (len(STAGES), len(STAGES) + 1)
-            or any(not isinstance(stage, dict) for stage in stages)
-            or tuple(stage.get("stage") for stage in stages) not in (STAGES, STAGES + (POST_WRITE_STAGE,))
-            or result.get("stages") != stages):
-        raise RecoveryError("Fixture needs four ordered stages, optionally followed by the additional-writes stage.")
     environment = _json_file(root, "environment.json")
     if not isinstance(environment, dict) or environment.get("fixture_id") != fixture_id:
         raise RecoveryError("Fixture environment ID differs from its result.")
+    filesystem = environment.get("filesystem", "NTFS")
+    if filesystem not in ("NTFS", "exFAT"):
+        raise RecoveryError("Unsupported fixture filesystem.")
+    orders = (STAGES[:2],) if filesystem == "exFAT" else (STAGES, STAGES + (POST_WRITE_STAGE,))
+    stages = _json_file(root, "stages.json")
+    if (not isinstance(stages, list) or len(stages) not in {len(order) for order in orders}
+            or any(not isinstance(stage, dict) for stage in stages)
+            or tuple(stage.get("stage") for stage in stages) not in orders
+            or result.get("stages") != stages):
+        raise RecoveryError("Fixture stages do not match the filesystem's ordered deletion scenarios.")
     if environment.get("profile", "basic") not in ("basic", "expanded"):
         raise RecoveryError("Unknown fixture profile.")
     pressure_mib = environment.get("write_pressure_mib", 0)
@@ -155,7 +159,8 @@ def load_fixture(fixture: Path) -> dict:
             raise RecoveryError("Additional-write size distribution differs from the scenario.")
     generator_digest = _digest(environment.get("script_sha256"), "Generator sha256")
     originals = _originals(root, fixture_id)
-    _check_recycle_evidence(root, originals)
+    if filesystem == "NTFS":
+        _check_recycle_evidence(root, originals)
     checked_stages, used_paths = [], set()
     for row in stages:
         checkpoint()
@@ -173,6 +178,10 @@ def load_fixture(fixture: Path) -> dict:
             raise RecoveryError(f"Invalid fixture geometry: {name}")
         identity = _checked_bytes(root, row["image"], size, digest)
         validate_geometry(Path(identity["path"]), offset, sector)
+        if filesystem == "exFAT":
+            from .filesystems import identify
+            if identify(Path(identity["path"]), offset, sector) != "exfat":
+                raise RecoveryError("Fixture filesystem differs from the image.")
         manifest = _manifest(root, row["manifest"], fixture_id)
         if (manifest.get("stage") != name or type(manifest.get("offset_sectors")) is not int
                 or manifest["offset_sectors"] != offset or type(manifest.get("sector_size")) is not int
@@ -201,9 +210,11 @@ def load_fixture(fixture: Path) -> dict:
                                   target_scenarios={key: expected[key]["scenario"] for key in targets},
                                   reference={"schema_version": 1, "files": list(targets.values())}))
     return {"fixture_id": fixture_id, "root": str(root), "generator_sha256": generator_digest,
-            "profile": environment.get("profile", "basic"), "write_pressure_mib": pressure_mib,
+            "profile": environment.get("profile", "basic"), "write_pressure_mib": pressure_mib, "filesystem": filesystem,
             "original_count": len(originals),
-            "unique_deleted_targets": sum(item["scenario"] != "retained-control" for item in originals.values()),
+            "unique_deleted_targets": sum(item["scenario"].startswith("direct-") or
+                                          (filesystem == "NTFS" and item["scenario"] == "recycle-bin")
+                                          for item in originals.values()),
             "stages": checked_stages}
 
 

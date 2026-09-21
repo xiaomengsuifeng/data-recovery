@@ -1,4 +1,4 @@
-"""Bounded read-only discovery of NTFS volumes in raw MBR/GPT images."""
+"""Bounded read-only discovery of NTFS/exFAT volumes in raw MBR/GPT images."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,6 +6,7 @@ import struct
 import zlib
 
 from .common import RecoveryError, regular_file
+from .filesystems import boot_format, exfat_geometry
 
 
 def inspect_image(path: Path) -> list[dict]:
@@ -23,25 +24,29 @@ def inspect_image(path: Path) -> list[dict]:
         def probe(lba, sector_size, label, partition_sectors=None):
             key = lba * sector_size
             boot = read(key, 512)
-            if len(boot) != 512 or boot[3:11] != b"NTFS    " or boot[510:512] != b"\x55\xaa":
+            try:
+                filesystem, bps = boot_format(boot)
+            except RecoveryError:
                 return
-            bps = int.from_bytes(boot[11:13], "little")
-            sectors = int.from_bytes(boot[40:48], "little")
+            sectors = int.from_bytes(boot[72:80] if filesystem == "exfat" else boot[40:48], "little")
             if bps not in (512, 1024, 2048, 4096) or key % bps or not sectors:
                 return
             size = sectors * bps
             if key + size > length or (partition_sectors and size > partition_sectors * sector_size):
                 return
             if key not in seen:
+                if filesystem == "exfat":
+                    exfat_geometry(path, key // bps, bps)
                 seen.add(key)
-                found.append(dict(label=label, offset=key // bps, sector_size=bps, size=size))
+                found.append(dict(label=label + " · " + filesystem.upper(), offset=key // bps,
+                                  sector_size=bps, size=size, filesystem=filesystem))
 
-        probe(0, 512, "NTFS 分区镜像")
+        probe(0, 512, "分区镜像")
         if found:
             return found
         mbr = read(0, 512)
         if len(mbr) != 512 or mbr[510:512] != b"\x55\xaa":
-            raise RecoveryError("未识别到 NTFS 分区或有效分区表。请选择 raw 镜像。")
+            raise RecoveryError("未识别到 NTFS / exFAT 分区或有效分区表。请选择 raw 镜像。")
         for sector in (512, 4096):
             header = read(sector, sector)
             if header[:8] == b"EFI PART":
@@ -91,5 +96,5 @@ def inspect_image(path: Path) -> list[dict]:
                 elif kind != 238:
                     probe(first, sector, f"MBR 分区 {index + 1}", size)
     if not found:
-        raise RecoveryError("此镜像中未找到受支持的 NTFS 分区。第一版支持 NTFS。")
+        raise RecoveryError("此镜像中未找到受支持的 NTFS / exFAT 分区。")
     return sorted(found, key=lambda item: item["offset"] * item["sector_size"])

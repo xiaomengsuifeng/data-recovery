@@ -14,6 +14,7 @@ from .control import checkpoint
 
 from .common import RecoveryError
 from .tsk import run_bounded
+from .filesystems import boot_format, exfat_geometry
 
 
 @dataclass(frozen=True)
@@ -21,17 +22,24 @@ class VolumeSource:
     mount: str
 
 
+@dataclass(frozen=True)
+class DiskSource:
+    number: int
+
+
 _DISCOVER = r"""
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
-$rows = @(Get-Volume | Where-Object { $_.DriveLetter -and $_.FileSystem -eq 'NTFS' } | ForEach-Object {
+$rows = @(Get-Volume | Where-Object { $_.DriveLetter -and $_.FileSystem -in @('NTFS', 'exFAT') } | ForEach-Object {
   $v = $_
   $p = @(Get-Partition -DriveLetter $v.DriveLetter -ErrorAction SilentlyContinue)
   $d = @($p | Get-Disk -ErrorAction SilentlyContinue)
   [pscustomobject]@{
     mount = ([string]$v.DriveLetter + ':\'); label = [string]$v.FileSystemLabel
-    size = [long]$v.Size; free = [long]$v.SizeRemaining; guid = [string]$v.UniqueId
+    filesystem = [string]$v.FileSystem
+    size = if ($p.Count -eq 1) { [long]$p[0].Size } else { [long]$v.Size }
+    free = [long]$v.SizeRemaining; guid = [string]$v.UniqueId
     disk_numbers = @($d | ForEach-Object { [int]$_.Number } | Sort-Object -Unique)
     disk_ids = @($d | ForEach-Object { [string]$_.UniqueId } | Sort-Object -Unique)
     sector_size = if ($d.Count) { [int]$d[0].LogicalSectorSize } else { 512 }
@@ -49,6 +57,10 @@ def list_volumes() -> list[dict]:
 
 
 def _query_volumes(script: str) -> list[dict]:
+    return validate_volume_rows(_query_storage(script))
+
+
+def _query_storage(script: str):
     """Bound and cancel Storage queries just like the recovery subprocesses."""
     checkpoint()
     executable = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
@@ -63,7 +75,7 @@ def _query_volumes(script: str) -> list[dict]:
         data = json.loads(output.getvalue().decode("utf-8-sig"))
     except (UnicodeError, ValueError) as exc:
         raise RecoveryError("Windows 返回了无效的磁盘列表，请刷新后重试。") from exc
-    return validate_volume_rows(data)
+    return data
 
 
 def validate_volume_rows(data) -> list[dict]:
@@ -96,7 +108,7 @@ def volume_identity(mount: str) -> dict:
     matches = [v for v in list_volumes() if v["mount"].upper() == mount]
     if (len(matches) != 1 or not matches[0]["guid"] or not matches[0]["disk_numbers"]
             or not matches[0]["disk_ids"]):
-        raise RecoveryError("无法确认此 NTFS 卷对应的物理磁盘。请检查磁盘连接。")
+        raise RecoveryError("无法确认此 NTFS / exFAT 卷对应的物理磁盘。请检查磁盘连接。")
     value = matches[0]
     return dict(value, kind="windows_volume", path="\\\\.\\" + mount[:2])
 
@@ -112,7 +124,7 @@ def check_volume(expected: dict) -> dict:
 
 
 def ensure_other_disk(source: dict, destination: Path):
-    if source.get("kind") != "windows_volume":
+    if source.get("kind") not in ("windows_volume", "windows_disk"):
         return
     destination = destination.absolute()
     existing = destination
@@ -125,7 +137,7 @@ def ensure_other_disk(source: dict, destination: Path):
     if not re.fullmatch(r"[A-Za-z]:", drive):
         raise RecoveryError("恢复目标与工作目录需要位于另一块本地物理磁盘。")
     # Query all filesystem types for the destination, not just NTFS volumes.
-    script = _DISCOVER.replace("$_.DriveLetter -and $_.FileSystem -eq 'NTFS'", "$_.DriveLetter")
+    script = _DISCOVER.replace("$_.DriveLetter -and $_.FileSystem -in @('NTFS', 'exFAT')", "$_.DriveLetter")
     rows = _query_volumes(script)
     matches = [v for v in rows if v["mount"][:2].upper() == drive.upper()]
     if len(matches) != 1 or not matches[0]["disk_numbers"]:
@@ -136,7 +148,7 @@ def ensure_other_disk(source: dict, destination: Path):
 
 def ensure_safe_locations(source: dict, *locations: Path):
     """Reapply the placement policy when reopening an existing live session."""
-    if source.get("kind") != "windows_volume":
+    if source.get("kind") not in ("windows_volume", "windows_disk"):
         return
     import sys
     for location in (Path(sys.executable), Path(__file__), *locations):
@@ -155,9 +167,56 @@ def read_volume_boot(identity: dict) -> bytes:
         raise RecoveryError("读取磁盘需要管理员权限，请使用“以管理员身份重新启动”。") from exc
     except OSError as exc:
         raise RecoveryError("源磁盘无法读取，可能已断开、锁定或发生读取错误。请检查连接后重新扫描。") from exc
-    if boot[3:11] != b"NTFS    " or boot[510:512] != b"\x55\xaa":
-        raise RecoveryError("未读到 NTFS 引导信息；磁盘可能被加密、锁定或不受支持。")
+    filesystem, sector = boot_format(boot)
+    if filesystem == "exfat":
+        exfat_geometry(Path(identity["path"]), 0, sector, length=identity["size"])
     return boot
+
+
+def list_disks() -> list[dict]:
+    if os.name != "nt":
+        return []
+    data = _query_storage(r"""
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+$rows = @(Get-Disk | ForEach-Object {
+  [pscustomobject]@{ number = [int]$_.Number; label = [string]$_.FriendlyName
+    size = [long]$_.Size; sector_size = [int]$_.LogicalSectorSize
+    disk_ids = @([string]$_.UniqueId); disk_numbers = @([int]$_.Number)
+    system = [bool]($_.IsBoot -or $_.IsSystem) }
+})
+ConvertTo-Json -InputObject $rows -Depth 5 -Compress
+""")
+    if not isinstance(data, list):
+        raise RecoveryError("Invalid Windows disk list.")
+    for row in data:
+        if (not isinstance(row, dict) or type(row.get("number")) is not int or row["number"] < 0
+                or type(row.get("size")) is not int or not 0 < row["size"] < 1 << 63
+                or type(row.get("sector_size")) is not int or row["sector_size"] not in (512, 1024, 2048, 4096)
+                or row.get("disk_numbers") != [row["number"]]
+                or not isinstance(row.get("disk_ids"), list) or len(row["disk_ids"]) != 1
+                or not isinstance(row["disk_ids"][0], str) or not row["disk_ids"][0].strip()
+                or not isinstance(row.get("label"), str) or type(row.get("system")) is not bool):
+            raise RecoveryError("物理磁盘身份不完整，无法安全采集。")
+    return data
+
+
+def disk_identity(number: int) -> dict:
+    if os.name != "nt" or type(number) is not int or number < 0:
+        raise RecoveryError("请选择明确的 Windows 物理磁盘编号。")
+    rows = [r for r in list_disks() if r["number"] == number]
+    if len(rows) != 1:
+        raise RecoveryError("源物理磁盘已断开或身份无法确认。")
+    return dict(rows[0], kind="windows_disk", path=rf"\\.\PhysicalDrive{number}")
+
+
+def check_disk(expected: dict) -> dict:
+    actual = disk_identity(expected["number"])
+    for key in ("path", "size", "sector_size", "disk_numbers", "disk_ids"):
+        if actual[key] != expected.get(key):
+            raise RecoveryError("源物理磁盘身份或布局发生变化，已停止采集。")
+    return actual
 
 
 def is_admin() -> bool:

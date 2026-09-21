@@ -10,12 +10,13 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import __version__
-from . import carving, ntfs_log
+from . import carving, ntfs_log, jpeg
 from .common import (RecoveryError, check_identity, image_identity, new_directory,
                      read_json, regular_file, sha256_file, write_json)
 from .recycle_bin import InvalidRecycleMetadata, pair_key, parse_dollar_i
 from .tsk import ATTRIBUTE_ID, Tsk
 from .control import checkpoint, progress
+from .filesystems import identify, boot_format, exfat_geometry
 from .windows import VolumeSource, ensure_safe_locations, read_volume_boot, volume_identity
 
 
@@ -29,10 +30,11 @@ def validate_geometry(image: Path, offset: int, sector_size: int) -> None:
     with image.open("rb") as stream:
         stream.seek(offset * sector_size)
         boot = stream.read(512)
-    if boot[3:11] != b"NTFS    " or boot[510:512] != b"\x55\xaa":
-        raise RecoveryError("No NTFS boot sector at this offset. Use the partition's starting sector.")
-    if int.from_bytes(boot[11:13], "little") != sector_size:
-        raise RecoveryError("NTFS sector size differs from --sector-size.")
+    filesystem, actual_sector = boot_format(boot)
+    if actual_sector != sector_size:
+        raise RecoveryError("Filesystem sector size differs from --sector-size.")
+    if filesystem == "exfat":
+        exfat_geometry(image, offset, sector_size)
 
 
 def _candidate_id(inode: str, path: str) -> str:
@@ -87,84 +89,156 @@ def _associate_recycle(candidates: list[dict], backend: Tsk, image: Path,
 
 def scan(image: Path | VolumeSource, output: Path, *, backend: Tsk, offset: int = 0,
          sector_size: int = 512, max_candidates: int = 10000, deep_png: bool = False,
-         deep_log: bool = False) -> dict:
-    if type(max_candidates) is not int or not 1 <= max_candidates <= 100000:
-        raise RecoveryError("--max-candidates must be between 1 and 100000 for this prototype.")
-    if type(deep_png) is not bool:
-        raise RecoveryError("Invalid PNG deep-scan option.")
-    if type(deep_log) is not bool:
-        raise RecoveryError("Invalid NTFS log scan option.")
-    if deep_log and isinstance(image, VolumeSource):
-        raise RecoveryError("旧日志恢复目前仅支持 NTFS 镜像文件。")
-    if deep_png and isinstance(image, VolumeSource):
-        raise RecoveryError("PNG 深度扫描目前仅支持镜像文件，请先使用 NTFS 镜像。")
+         deep_log: bool = False, deep_jpeg: bool = False, reassemble_jpeg: bool = False) -> dict:
+    options = dict(max_candidates=max_candidates, deep_png=deep_png, deep_log=deep_log,
+                   deep_jpeg=deep_jpeg, reassemble_jpeg=reassemble_jpeg)
+    _validate_scan_options(options)
     if isinstance(image, VolumeSource):
+        if deep_log or deep_png or deep_jpeg or reassemble_jpeg:
+            raise RecoveryError("内容深度扫描和旧日志恢复仅支持镜像文件，请先采集镜像。")
         identity = volume_identity(image.mount)
         ensure_safe_locations(identity, output)
-        boot = read_volume_boot(identity)
-        sector_size = int.from_bytes(boot[11:13], "little")
-        if sector_size not in (512, 1024, 2048, 4096):
-            raise RecoveryError("不支持此卷的扇区尺寸。")
+        _, sector_size = boot_format(read_volume_boot(identity))
         image, offset = Path(identity["path"]), 0
     else:
         image = regular_file(image)
         validate_geometry(image, offset, sector_size)
         progress("source", message="核对源镜像")
         identity = image_identity(image)
+    filesystem = identify(image, offset, sector_size)
+    if deep_log and filesystem != "ntfs":
+        raise RecoveryError("exFAT 没有 NTFS 旧日志，请关闭旧日志选项。")
     directory = new_directory(output)
-    candidates, warnings = backend.scan(image, offset, sector_size)
-    if len(candidates) > max_candidates:
-        raise RecoveryError(f"More than {max_candidates} candidates; increase --max-candidates explicitly.")
-    for candidate in candidates:
-        checkpoint()
-        candidate["id"] = _candidate_id(candidate["inode"], candidate["observed_path"])
-        root_name = candidate["observed_path"].replace("\\", "/").lstrip("/").split("/", 1)[0].lower()
-        if root_name in ("$orphanfiles", "$recycle.bin"):
-            candidate["original_path"] = None
-            candidate["path_evidence"] = "generated_or_recycle_path_only"
-            candidate["warnings"].append("Observed system/recovery path does not establish the original directory.")
-    progress("recycle", message="关联回收站名称与内容")
-    _associate_recycle(candidates, backend, image, offset, sector_size, directory)
-    carving_report = None
-    if deep_png:
-        carved, carving_report = carving.scan_png(image, offset, sector_size, backend=backend,
-                                                  max_candidates=max_candidates - len(candidates))
-        for candidate in carved:
-            candidate["id"] = _candidate_id(f"png:{candidate['carving']['image_offset']}", candidate["observed_path"])
-        candidates.extend(carved)
-        warnings.append("PNG 深度扫描结果原名与目录未知，可能与文件记录结果重复；仅支持未分配空间中的连续静态 PNG，最大 256 MiB。")
-    log_report = None
-    if deep_log:
-        historical, log_report = ntfs_log.scan_log(image, offset, sector_size, backend=backend,
-                                                  max_candidates=max_candidates - len(candidates))
-        for candidate in historical:
-            info = candidate["ntfs_log"]
-            candidate["id"] = _candidate_id(
-                f"log:{info['record']}:{info['sequence']}:{info['initialization_lsn']}:{info['file_offset']}",
-                candidate["observed_path"])
-        candidates.extend(historical)
-        warnings.append("旧日志恢复仅支持部分 NTFS 日志格式；历史名称和内容需核对，有缺口的数据单独标为片段。")
-    progress("source", message="复核扫描源")
-    check_identity(identity)
-    report = {
-        "schema_version": 1, "prototype_version": __version__, "status": "scanned",
-        "source": identity, "offset": offset, "sector_size": sector_size,
-        "backend": {"name": "The Sleuth Kit", "versions": backend.versions},
-        "candidate_count": len(candidates), "candidates": candidates, "warnings": warnings,
-        "scan_options": {"deep_png": deep_png, "deep_log": deep_log}, "carving": carving_report, "ntfs_log": log_report,
-        "limitations": [
-            "Metadata recovery supports deleted NTFS unnamed data attributes.",
-            "Deleted directories are visited separately; damaged or reused directory records may remain incomplete.",
-            "Deleted allocation pointers can reference reused content; export does not prove integrity.",
-            "Optional PNG carving checks contiguous unallocated image bytes and chunk CRCs; original names and paths are unknown.",
-            "Optional log evidence recovery reads historical nonresident runs in reused MFT generations; fragments are explicitly partial.",
-            "No fragmented-file carving, other content formats, EFS/BitLocker decryption, or TRIM reversal is implemented.",
-        ],
-    }
-    if identity.get("kind") == "windows_volume":
-        report["limitations"].append("Live volume identity is checked, but the OS may change its contents during recovery.")
-    write_json(directory / "session.json", report)
-    return report
+    state = {"schema_version": 1, "kind": "scan_checkpoint", "checkpoint_version": 1,
+             "prototype_version": __version__, "status": "running", "source": identity,
+             "offset": offset, "sector_size": sector_size, "filesystem": filesystem,
+             "backend": {"name": "The Sleuth Kit", "versions": backend.versions},
+             "options": options, "stages": {}}
+    return _continue_scan(directory, state, backend)
+
+
+def _validate_scan_options(options):
+    if (not isinstance(options, dict) or set(options) !=
+            {"max_candidates", "deep_png", "deep_log", "deep_jpeg", "reassemble_jpeg"}
+            or type(options["max_candidates"]) is not int or not 1 <= options["max_candidates"] <= 100000
+            or any(type(options[key]) is not bool for key in ("deep_png", "deep_log", "deep_jpeg", "reassemble_jpeg"))
+            or (options["reassemble_jpeg"] and not options["deep_jpeg"])):
+        raise RecoveryError("Invalid deep scan options or --max-candidates (1..100000).")
+
+
+def resume_scan(session: Path, *, backend: Tsk) -> dict:
+    directory = session.resolve(strict=True)
+    state = read_json(directory / "scan-progress.json")
+    if (state.get("kind") != "scan_checkpoint" or state.get("checkpoint_version") != 1
+            or state.get("prototype_version") != __version__
+            or not isinstance(state.get("source"), dict) or state["source"].get("kind") == "windows_volume"
+            or not isinstance(state.get("stages"), dict)
+            or set(state["stages"]) - {"metadata", "png", "jpeg", "log"}
+            or state.get("backend", {}).get("versions") != backend.versions):
+        raise RecoveryError("扫描断点格式或版本不匹配；实时卷无法断点续扫，请先采集镜像。")
+    _validate_scan_options(state.get("options"))
+    for stage in state["stages"].values():
+        if not isinstance(stage, dict) or set(stage) not in ({"partial"}, {"result"}):
+            raise RecoveryError("Invalid saved scan stage.")
+    check_identity(state["source"])
+    image = regular_file(Path(state["source"]["path"]))
+    validate_geometry(image, state["offset"], state["sector_size"])
+    if identify(image, state["offset"], state["sector_size"]) != state["filesystem"]:
+        raise RecoveryError("扫描源文件系统与断点不一致。")
+    return _continue_scan(directory, state, backend)
+
+
+def _continue_scan(directory, state, backend):
+    from .journal import atomic_json, exclusive_job, run_stage
+    from . import jpeg
+    identity, options = state["source"], state["options"]
+    image, offset, sector_size = Path(identity["path"]), state["offset"], state["sector_size"]
+    maximum = options["max_candidates"]
+    path = None if identity.get("kind") == "windows_volume" else directory / "scan-progress.json"
+    with exclusive_job(directory):
+        # A crash after publishing the final session must not overwrite it.
+        if (directory / "session.json").exists():
+            report = read_json(directory / "session.json")
+            _validate_candidates(report.get("candidates"))
+            if report.get("source") != identity or report.get("status") != "scanned":
+                raise RecoveryError("扫描目录已有其他结果。")
+            return report
+        state["status"] = "running"
+        if path:
+            atomic_json(path, state)
+        try:
+            def metadata():
+                candidates, warnings = backend.scan(image, offset, sector_size)
+                if len(candidates) > maximum:
+                    raise RecoveryError(f"More than {maximum} candidates; increase --max-candidates explicitly.")
+                for candidate in candidates:
+                    checkpoint()
+                    candidate["id"] = _candidate_id(candidate["inode"], candidate["observed_path"])
+                    root = candidate["observed_path"].replace("\\", "/").lstrip("/").split("/", 1)[0].lower()
+                    if root in ("$orphanfiles", "$recycle.bin"):
+                        candidate["original_path"] = None
+                        candidate["path_evidence"] = "generated_or_recycle_path_only"
+                        candidate["warnings"].append("Observed system/recovery path does not establish the original directory.")
+                progress("recycle", message="关联回收站名称与内容")
+                _associate_recycle(candidates, backend, image, offset, sector_size, directory)
+                return candidates, warnings
+            candidates, warnings = run_stage(state, "metadata", path, metadata)
+            _validate_candidates(candidates)
+            summaries = {"carving": None, "jpeg": None, "ntfs_log": None}
+            for enabled, stage, key, function, extra in (
+                    (options["deep_png"], "png", "carving", carving.scan_png, {}),
+                    (options["deep_jpeg"], "jpeg", "jpeg", jpeg.scan_jpeg, {"reassemble": options["reassemble_jpeg"]}),
+                    (options["deep_log"], "log", "ntfs_log", ntfs_log.scan_log, {})):
+                if not enabled:
+                    continue
+                recovered, summary = run_stage(state, stage, path, lambda: function(
+                    image, offset, sector_size, backend=backend, max_candidates=maximum - len(candidates), **extra))
+                for candidate in recovered:
+                    if stage in ("png", "jpeg"):
+                        fingerprint = f"{stage}:{candidate['carving']['image_offset']}"
+                    else:
+                        info = candidate["ntfs_log"]
+                        fingerprint = f"log:{info['record']}:{info['sequence']}:{info['initialization_lsn']}:{info['file_offset']}"
+                    candidate["id"] = _candidate_id(fingerprint, candidate["observed_path"])
+                _validate_candidates(recovered)
+                candidates.extend(recovered)
+                summaries[key] = summary
+                warnings.extend(summary.get("warnings", []))
+                if stage == "jpeg":
+                    warnings.append(f"JPEG 查找：{summary['candidate_count']} 项，其中碎片重组 "
+                                    f"{summary['reconstructed_count']} 项；歧义跳过 {summary['ambiguous_headers']} 项，"
+                                    f"搜索达到边界 {summary['limited_searches']} 次。重组结果需逐张核对。")
+            _validate_candidates(candidates)
+            if len(candidates) > maximum:
+                raise RecoveryError("Saved scan exceeds the candidate limit.")
+            progress("source", message="复核扫描源")
+            check_identity(identity)
+            report = {"schema_version": 1, "prototype_version": __version__, "status": "scanned",
+                "source": identity, "offset": offset, "sector_size": sector_size, "filesystem": state["filesystem"],
+                "backend": state["backend"], "candidate_count": len(candidates), "candidates": candidates,
+                "warnings": warnings, "scan_options": {k: v for k, v in options.items() if k != "max_candidates"},
+                **summaries,
+                "limitations": [
+                    "Deleted NTFS/exFAT records and allocation pointers may refer to reused content; export does not prove integrity.",
+                    "Content carving generates names, may duplicate metadata candidates, and cannot establish original paths.",
+                    "JPEG reconstruction is bounded and uncertain; unsupported fragmentation is not silently declared recovered.",
+                    "NTFS log evidence is format-dependent; missing ranges remain explicit fragments.",
+                    "No EFS/BitLocker decryption, overwritten-byte recovery, or TRIM reversal is provided."]}
+            if identity.get("kind") == "windows_volume":
+                report["limitations"].append("Live volume identity is checked, but the OS may change its contents during recovery.")
+            write_json(directory / "session.json", report)
+            state["status"] = "completed"
+            if path:
+                atomic_json(path, state)
+            return report
+        except BaseException as exc:
+            state["status"] = "paused" if isinstance(exc, KeyboardInterrupt) else "failed"
+            if path:
+                try:
+                    atomic_json(path, state)
+                except (OSError, RecoveryError):
+                    pass  # Preserve the earlier durable checkpoint and original failure.
+            raise
 
 
 def safe_relative_path(original: str) -> Path:
@@ -204,10 +278,13 @@ def _validate_candidates(candidates) -> None:
         method = candidate.get("recovery_method", "ntfs_metadata")
         if method == "png_carving":
             carving.validate_candidate(candidate)
+        elif method == "jpeg_carving":
+            jpeg.validate_candidate(candidate)
         elif method == "ntfs_log":
             ntfs_log.validate_candidate(candidate)
-        elif method == "ntfs_metadata":
-            if (not isinstance(candidate.get("inode"), str) or not ATTRIBUTE_ID.fullmatch(candidate["inode"])
+        elif method in ("ntfs_metadata", "exfat_metadata"):
+            pattern = ATTRIBUTE_ID if method == "ntfs_metadata" else re.compile(r"[0-9]{1,20}")
+            if (not isinstance(candidate.get("inode"), str) or not pattern.fullmatch(candidate["inode"])
                     or "carving" in candidate or "ntfs_log" in candidate):
                 raise RecoveryError("Invalid NTFS attribute ID or extraction descriptor.")
         else:
@@ -227,6 +304,9 @@ def extract_candidate(image: Path, offset: int, sector_size: int, candidate: dic
     if candidate.get("recovery_method") == "png_carving":
         image = regular_file(image)  # Carving must never read a live device.
         carving.extract_png(image, offset, sector_size, candidate, output, backend=backend)
+    elif candidate.get("recovery_method") == "jpeg_carving":
+        image = regular_file(image)
+        jpeg.extract_jpeg(image, offset, sector_size, candidate, output, backend=backend)
     elif candidate.get("recovery_method") == "ntfs_log":
         image = regular_file(image)
         ntfs_log.extract_log(image, offset, sector_size, candidate, output, backend=backend)

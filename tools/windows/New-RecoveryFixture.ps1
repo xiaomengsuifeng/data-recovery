@@ -2,7 +2,7 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-Creates synthetic NTFS deletion fixtures inside a NEW, isolated fixed VHD.
+Creates synthetic NTFS/exFAT deletion fixtures inside a NEW, isolated fixed VHD.
 .DESCRIPTION
 Windows 11 only. No existing disk/volume/VHD can be supplied as a target.
 The output parent must exist; this script always creates a unique child directory.
@@ -14,6 +14,8 @@ Exercised on Windows 11. Read docs/windows-testing.md for partial acceptance res
 param(
     [Parameter(Mandatory = $true)]
     [string] $OutputParent,
+    [ValidateSet('NTFS', 'exFAT')]
+    [string] $FileSystem = 'NTFS',
     [ValidateSet('basic', 'expanded')]
     [string] $Profile = 'basic',
     [ValidateRange(0, 64)]
@@ -22,6 +24,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($FileSystem -eq 'exFAT' -and $WritePressureMiB -ne 0) {
+    throw 'The exFAT fixture covers direct deletion only; WritePressureMiB must be zero.'
+}
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'Run this script on Windows 11, not on the Mac development machine.'
 }
@@ -50,10 +55,11 @@ foreach ($command in @('Get-DiskImage', 'Mount-DiskImage', 'Dismount-DiskImage',
     $null = Get-Command $command -ErrorAction Stop
 }
 $fixtureId = [Guid]::NewGuid().ToString('N')
-$fixtureWork = Join-Path $fixtureParent ('ntfs-fixture-' + $fixtureId)
+$fixtureWork = Join-Path $fixtureParent ($FileSystem.ToLowerInvariant() + '-fixture-' + $fixtureId)
 $null = New-Item -ItemType Directory -Path $fixtureWork -ErrorAction Stop
 $fixtureVhd = Join-Path $fixtureWork 'fixture.vhd'
 $fixtureLabel = 'RECOV_' + $fixtureId.Substring(0, 12)
+if ($FileSystem -eq 'exFAT') { $fixtureLabel = 'RC_' + $fixtureId.Substring(0, 8) }
 $fixtureMarker = '.recovery-fixture-' + $fixtureId
 $fixtureBytes = [long](128 * 1MB)
 $fixtureDiskNumber = $null
@@ -143,7 +149,7 @@ function Assert-OwnedVolume([switch] $RequireMarker) {
     if ([string]$part.DriveLetter -ne $fixtureLetter -or
         [long]$part.Offset -ne [long]$fixtureOffset) { throw 'Test partition/drive mapping changed.' }
     $volume = $part | Get-Volume -ErrorAction Stop
-    if ($volume.FileSystem -ne 'NTFS' -or $volume.FileSystemLabel -ne $fixtureLabel) {
+    if ($volume.FileSystem -ne $FileSystem -or $volume.FileSystemLabel -ne $fixtureLabel) {
         throw 'Test volume filesystem or label does not match.'
     }
     $viaLetter = @(Get-Partition -DriveLetter $fixtureLetter -ErrorAction Stop)
@@ -501,9 +507,9 @@ try {
         os = [Environment]::OSVersion.VersionString; powershell = $PSVersionTable.PSVersion.ToString()
         process_architecture = $env:PROCESSOR_ARCHITECTURE; vhd_bytes = $fixtureBytes
         diskpart_code_page = [Text.Encoding]::Default.CodePage
-        profile = $Profile; write_pressure_mib = $WritePressureMiB
+        profile = $Profile; write_pressure_mib = $WritePressureMiB; filesystem = $FileSystem
         script_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        note = 'Synthetic logical NTFS test; does not simulate physical SSD TRIM or hardware failure.'
+        note = 'Synthetic logical filesystem test; does not simulate physical SSD TRIM or hardware failure.'
     })
     Write-FixtureEvent 'creating-new-fixed-vhd' @{ path = $fixtureVhd; bytes = $fixtureBytes }
     if (Test-Path -LiteralPath $fixtureVhd) { throw 'Refusing an existing VHD.' }
@@ -529,7 +535,7 @@ try {
     # The disk number below was resolved from only our freshly-created VHD and rechecked above execution.
     Invoke-FixtureDiskpart 'format' @(
         "select vdisk file=`"$fixtureVhd`"", "select disk $fixtureDiskNumber", 'convert mbr',
-        'create partition primary', "format fs=ntfs quick label=`"$fixtureLabel`"",
+        'create partition primary', "format fs=$FileSystem quick label=`"$fixtureLabel`"",
         "assign letter=$fixtureLetter"
     )
     $disk = Get-OwnedDisk
@@ -599,6 +605,15 @@ try {
     }
     Write-FixtureEvent 'direct-delete-complete' @{ targets = $direct.Count; method = 'System.IO delete, bypasses Recycle Bin' }
     Export-Stage 'after-direct-delete' $direct
+    if ($FileSystem -eq 'exFAT') {
+        Write-FixtureJson (Join-Path $fixtureWork 'result.json') @{
+            status = 'complete'; fixture_id = $fixtureId; filesystem = $FileSystem
+            stages = @($fixtureSnapshots.ToArray())
+            note = 'exFAT direct-file and deleted-directory fixtures; no NTFS recycle-bin assumptions.'
+        }
+        Write-Host "exFAT fixture complete: $fixtureWork"
+        return
+    }
     Mount-OwnedFixture
 
     foreach ($entry in $recycled) {

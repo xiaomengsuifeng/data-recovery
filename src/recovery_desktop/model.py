@@ -65,8 +65,10 @@ class CandidateModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             path = item.get("original_path")
             evidence = "原名待确认" if not path else ("回收站记录" if "recycle_metadata" in item.get("path_evidence", "") else "文件记录")
-            if item.get("recovery_method") == "png_carving":
+            if item.get("recovery_method") in ("png_carving", "jpeg_carving"):
                 evidence = "深度扫描·生成名称"
+                if item.get("carving", {}).get("reconstructed"):
+                    evidence = "JPEG 碎片重组·待核对"
             display_name = filename(item)
             if item.get("recovery_method") == "ntfs_log":
                 evidence = "旧日志·历史名称" if path else "旧日志·原目录未知"
@@ -77,6 +79,8 @@ class CandidateModel(QAbstractTableModel):
                       str(PureWindowsPath(path).parent) if path else "原目录未知", evidence)
             return values[column]
         if role == Qt.ItemDataRole.ToolTipRole:
+            if item.get("recovery_method") == "jpeg_carving":
+                return "\n".join(item.get("warnings", []))
             if item.get("recovery_method") == "ntfs_log":
                 return (item.get("original_path") or item["observed_path"]) + "\n" + "\n".join(item.get("warnings", []))
             if item.get("recovery_method") == "png_carving":

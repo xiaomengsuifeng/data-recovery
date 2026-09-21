@@ -1,16 +1,17 @@
 # 拾回 · 免费数据恢复
 
-面向 Windows 普通用户的本地 NTFS 误删文件恢复工具。当前版本 **0.2.1rc1 软件候选版**，提供来源选择、扫描、筛选、预览、批量导出、任务取消和结果报告；开源、无需账号、无恢复容量收费门槛。
+面向 Windows 普通用户的本地 NTFS / exFAT 误删文件恢复工具。当前版本 **0.3.0rc1 软件候选版**，提供扫描、筛选、预览、导出、PNG/JPEG 内容扫描、有界 JPEG 碎片重组、只读镜像采集与中断续接；开源、无需账号、无恢复容量收费门槛。
 
 主要解决直接删除、误删文件夹，以及清空回收站后仍留有可读取记录的文件恢复。文件是否能恢复取决于残留数据；不把候选数量或预览成功当作恢复成功率。
 
 ## Windows 使用
 
-当前源码构建的候选包为 `ShiHui-0.2.1rc1-windows-x64.zip`，完整解压后双击 `Start-ShiHui.cmd`。便携包自带 Python、Qt 和 TSK，无需安装开发环境。直接扫描磁盘需要管理员权限，软件、工作目录和输出需位于另一块物理磁盘。
+当前源码构建的候选包为 `ShiHui-0.3.0rc1-windows-x64.zip`，完整解压后双击 `Start-ShiHui.cmd`。便携包自带 Python、Qt 和 TSK，无需安装开发环境。直接读取设备需要管理员权限，软件、工作目录和输出需位于另一块物理磁盘。
 
-首版 NTFS 范围的软件开发和本地自动回归已完成，专用物理介质验收仍待补充。0.2.1rc1 尚未上传发布；[GitHub Releases 中的原始 0.2.0](https://github.com/xiaomengsuifeng/data-recovery/releases/tag/v0.2.0) 不含后续 PNG、旧日志及软件收尾更新。GitHub 自动生成的 “Source code” 压缩包仅包含项目源码。
+本轮已补齐四项扩展软件任务，专用物理介质验收按用户安排暂缓。0.3.0rc1 为本地交付，尚未上传 GitHub Release；历史 0.2.0 包不含本轮更新。GitHub 自动生成的 “Source code” 压缩包仅包含项目源码。
 
 - [桌面使用说明、支持范围和常见问题](docs/desktop-guide.md)
+- [0.3.0rc1 四项扩展功能与验收证据](docs/milestones/11-extended-software.md)
 - [0.2.1rc1 软件收尾、验证方法与交付边界](docs/milestones/10-software-completion.md)
 - [0.2.0 开发验收与验证边界](docs/milestones/02-desktop-test-release.md)
 - [Windows 隔离样本生成与真机验收](docs/windows-testing.md)
@@ -20,7 +21,7 @@ Windows 卷枚举、只读访问、同物理盘拦截和管理员重启已实现
 
 ## 开发与验证
 
-桌面采用 PySide6 / Qt Widgets，核心采用 Python 标准库与独立运行的 The Sleuth Kit `fls` / `icat`。镜像模式自动识别 raw、MBR/GPT 和扩展分区中的 NTFS；真实设备模式支持 Windows 上有盘符的 NTFS 卷。
+桌面采用 PySide6 / Qt Widgets，核心采用 Python 标准库与独立运行的 The Sleuth Kit `fls` / `icat`。镜像模式自动识别 raw、MBR/GPT 和扩展分区中的 NTFS / 标准单 FAT exFAT；直接扫描支持 Windows 上有盘符的这两类卷。整盘可只读采集为 raw 镜像。
 
 ```sh
 python3 -m venv .venv
@@ -29,11 +30,11 @@ PYTHONPATH=src .venv/bin/python -B -m recovery_desktop --tsk-bin /path/to/tsk/bi
 PYTHONPATH=src QT_QPA_PLATFORM=offscreen .venv/bin/python -B -m unittest discover -s tests -v
 ```
 
-开发桌面推荐 Python 3.11–3.13。包内运行时固定为 Python 3.13.12 x64。CLI 的 `doctor / scan / recover / verify / validate-fixture` 可单独使用；CLI 扫描入口限镜像，Windows 磁盘扫描通过桌面提供。
+开发桌面推荐 Python 3.11–3.13。包内运行时固定为 Python 3.13.12 x64。CLI 提供 `doctor / scan / resume-scan / acquire / resume-acquire / recover / verify / validate-fixture`；CLI 扫描入口限镜像，Windows 卷扫描通过桌面提供。
 
 [开发命令、报告格式、可复现演示和 Windows 打包](docs/development.md)。Windows 包由固定上游归档离线组装，`tools/runtime-lock.json` 锁定下载地址、长度、SHA-256 和实际选用模块；包内附有对应开源组件源码与许可。
 
-当前自动测试共 238 项，管理员环境全部通过、无跳过，包含直接卷验收工具、扩展样本、旧日志、片段、内容扫描、Qt、符号链接，以及取消、断连、目标满盘和报告写入失败用例。原生窗口验收工具支持 100%、125%、150%、200% 缩放和独立原件核验。NIST DFR-01 镜像另用于原生 Qt 和真实 TSK 的桌面回归，其参考摘要来自删除后镜像的文档指定区域。[NIST 样本证据说明](tests/integration/fixture-source.md)
+自动测试包含 exFAT 几何与位图、JPEG 熵检查与歧义拒绝、坏区隔离、采集与扫描续接、Windows 保护、Qt 及旧功能回归，完整计数见[最新验收记录](docs/milestones/11-extended-software.md)。真实 Windows exFAT 删除实验的内容、文件名和目录匹配均为 26/26；JPEG 碎片另用独立原件核验。原生窗口验收覆盖 100%、125%、150%、200% 缩放。NIST 历史样本的参考摘要来自删除后指定磁盘区域，[证据边界单独记录](tests/integration/fixture-source.md)。
 
 隔离样本已保存 9 个删除前原件并生成四阶段镜像。同时启用 PNG 和旧日志扫描后，阶段内容匹配为 0/0、4/4、2/4、6/8，原路径匹配为 0、4、2、6。另导出 1 份文字片段，不计入完整恢复；仍有 2 个 TXT 未完整恢复，整轮保持 `incomplete`。另一独立生成的同类 Windows 样本得到相同计数。[使用方法](docs/windows-testing.md) · [验收报告](docs/milestones/07-ntfs-log-recovery.md)
 
@@ -43,10 +44,12 @@ PYTHONPATH=src QT_QPA_PLATFORM=offscreen .venv/bin/python -B -m unittest discove
 
 ## 当前边界
 
-- 支持 NTFS 未命名数据流的元数据恢复；删除目录额外遍历、回收站 `$I/$R` 关联、中文名称与目录导出已实现。
+- 支持 NTFS 未命名数据流和标准 exFAT 的删除记录恢复；删除目录额外遍历、回收站 `$I/$R` 关联、中文名称与目录导出已实现。
 - 镜像可选 PNG 深度扫描，仅支持未分配空间中的连续静态 PNG，最大 256 MiB；校验块结构与 CRC，不恢复原名与路径，可能产生重复或内嵌图片候选。
 - 镜像可选旧 NTFS 日志恢复，支持部分日志格式中的非驻留数据及复用记录；片段单独标记、保存和统计，历史名称与内容仍需核对。
-- 暂无 FAT/exFAT/APFS、其他格式或碎片文件的内容扫描、BitLocker/EFS 解密、坏盘采集、断点续扫和 TRIM 逆转。
+- JPEG 内容扫描最多 64 MiB / 4000 万像素；基线 JPEG 碎片重组最多 8 MiB，可尝试顺序空闲段或邻近两段拼接。歧义结果跳过，重组结果明确标为待核对，不推断原名与路径。
+- 只读采集支持文件、Windows 卷和整盘，先读取正常区域，再缩小失败区域并有限重试；记录坏区、取消和续采进度。镜像扫描保存元数据目录队列及 PNG/JPEG 块进度，可继续中断任务。
+- 暂不支持 FAT12/16/32、TexFAT、APFS、任意格式的碎片重组、BitLocker/EFS 解密、硬件维修和 TRIM 逆转。
 - 镜像模式在关键操作前后比较完整 SHA-256；真实卷只能核对设备身份，Windows 可能继续改变卷内容。
 - 清空回收站、追加写入和只读虚拟卷的直接访问已完成隔离 VHD 实测；软件故障分支有自动回归。可写物理介质、物理拔盘、真实 UAC 取消及跨显示器 DPI 切换仍待外部环境验收。
 

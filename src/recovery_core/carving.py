@@ -16,6 +16,8 @@ from pathlib import Path
 
 from .common import RecoveryError
 from .control import checkpoint, progress
+from .filesystems import identify, exfat_geometry, exfat_bitmap
+from .journal import partial, save_partial
 
 SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_PNG_BYTES = 256 * 1024 * 1024
@@ -41,6 +43,9 @@ def geometry(image: Path, offset: int, sector_size: int) -> Geometry:
     if (type(offset) is not int or offset < 0 or type(sector_size) is not int
             or sector_size not in (512, 1024, 2048, 4096)):
         raise RecoveryError("Invalid PNG carving source geometry.")
+    if identify(image, offset, sector_size) == "exfat":
+        value = exfat_geometry(image, offset, sector_size)
+        return Geometry(value.start, value.cluster_size, value.cluster_count)
     with image.open("rb") as stream:
         stream.seek(offset * sector_size)
         boot = stream.read(512)
@@ -59,6 +64,8 @@ def geometry(image: Path, offset: int, sector_size: int) -> Geometry:
 
 
 def allocation_bitmap(image: Path, offset: int, sector_size: int, volume: Geometry, backend) -> bytes:
+    if identify(image, offset, sector_size) == "exfat":
+        return exfat_bitmap(image, exfat_geometry(image, offset, sector_size))
     # NTFS $Bitmap is MFT record 6, with one low-bit-first bit per cluster.
     # Its data attribute is rounded to an eight-byte boundary by Windows.
     required = (volume.cluster_count + 7) // 8
@@ -204,16 +211,36 @@ def observed_path(start: int) -> str:
 
 def scan_png(image: Path, offset: int, sector_size: int, *, backend, max_candidates: int):
     volume = geometry(image, offset, sector_size)
-    progress("carving", message="读取 NTFS 未分配空间信息")
+    progress("carving", message="读取文件系统未分配空间信息")
     bitmap = allocation_bitmap(image, offset, sector_size, volume, backend)
     candidates = []
     scanned_bytes = attempts = 0
     # Bound repeated parsing of overlapping false signatures to two volume
     # reads, in addition to the single pass searching unallocated clusters.
     budget = [2 * (volume.end - volume.start)]
+    saved = partial()
+    cursor = volume.start
+    accepted_end = volume.start
+    if saved is not None:
+        candidates, cursor, accepted_end = saved["candidates"], saved["cursor"], saved["accepted_end"]
+        scanned_bytes, attempts, budget[0] = saved["scanned_bytes"], saved["attempts"], saved["budget"]
+        if (not isinstance(candidates, list) or len(candidates) > max_candidates
+                or any(type(n) is not int for n in (cursor, accepted_end, scanned_bytes, attempts, budget[0]))
+                or not volume.start <= cursor <= volume.end or not volume.start <= accepted_end <= volume.end
+                or not 0 <= attempts <= MAX_SIGNATURE_CHECKS or not 0 <= scanned_bytes <= volume.end - volume.start
+                or not 0 <= budget[0] <= 2 * (volume.end - volume.start)):
+            raise RecoveryError("Invalid PNG scan checkpoint.")
+        for item in candidates:
+            validate_candidate(item)
     with image.open("rb") as stream:
         for start, end in free_runs(bitmap, volume):
-            position, tail, accepted_end = start, b"", start
+            if cursor >= end:
+                continue
+            position, tail = max(start, cursor), b""
+            accepted_end = max(accepted_end, start)
+            if position > start:
+                stream.seek(max(start, position - 7))
+                tail = stream.read(min(7, position - start))
             while position < end:
                 progress("carving", position - volume.start, volume.end - volume.start, "查找 PNG 内容")
                 stream.seek(position)
@@ -252,8 +279,10 @@ def scan_png(image: Path, offset: int, sector_size: int, *, backend, max_candida
                     accepted_end = absolute + info["size"]
                 tail = data[-7:]
                 position += len(block)
+                save_partial(dict(candidates=candidates, cursor=position, accepted_end=accepted_end,
+                                  scanned_bytes=scanned_bytes, attempts=attempts, budget=budget[0]))
     progress("carving", volume.end - volume.start, volume.end - volume.start, "PNG 内容扫描完成")
-    return candidates, {"status": "completed", "format": "png", "scope": "ntfs_unallocated_clusters",
+    return candidates, {"status": "completed", "format": "png", "scope": identify(image, offset, sector_size) + "_unallocated_clusters",
                         "candidate_count": len(candidates), "scanned_bytes": scanned_bytes,
                         "signature_checks": attempts, "max_file_bytes": MAX_PNG_BYTES}
 

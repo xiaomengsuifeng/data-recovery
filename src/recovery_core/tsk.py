@@ -15,6 +15,8 @@ from pathlib import Path
 
 from .common import RecoveryError
 from .control import checkpoint, progress
+from .filesystems import identify
+from .journal import partial, save_partial
 
 ATTRIBUTE_ID = re.compile(r"^[0-9]+-128-[0-9]+$")
 REGULAR_BODY_MODE = re.compile(r"^[r-]/r[rwxstST-]{9}$")
@@ -129,7 +131,7 @@ def run_bounded(command: list[str], output, *, limit: int, timeout: float) -> No
         output.flush()
 
 
-def parse_body(text: str) -> tuple[list[dict], list[str]]:
+def parse_body(text: str, filesystem: str = "ntfs") -> tuple[list[dict], list[str]]:
     candidates, warnings = [], []
     seen = set()
     for number, line in enumerate(text.splitlines(), 1):
@@ -158,7 +160,8 @@ def parse_body(text: str) -> tuple[list[dict], list[str]]:
         # NTFS deleted names may have unknown name type '-' while metadata still
         # identifies a regular file ('-/r...'). Neither directory metadata nor a
         # contradictory directory/symlink name type is a regular-file candidate.
-        if not ATTRIBUTE_ID.fullmatch(inode) or not REGULAR_BODY_MODE.fullmatch(mode):
+        valid_inode = ATTRIBUTE_ID.fullmatch(inode) if filesystem == "ntfs" else re.fullmatch(r"[0-9]+", inode)
+        if not valid_inode or not REGULAR_BODY_MODE.fullmatch(mode):
             warnings.append(f"Skipped unsupported attribute/type at line {number}.")
             continue
         if ":" in name or any(ord(c) < 32 for c in name):
@@ -171,6 +174,8 @@ def parse_body(text: str) -> tuple[list[dict], list[str]]:
         candidates.append({"inode": inode, "observed_path": name, "size": size_value,
                            "original_path": name, "path_evidence": "filesystem_entry",
                            "warnings": [], "kind": "file"})
+        if filesystem == "exfat":
+            candidates[-1]["recovery_method"] = "exfat_metadata"
     return candidates, warnings
 
 
@@ -196,7 +201,7 @@ class Tsk:
             raise RecoveryError("fls and icat versions differ; use tools from the same release.")
 
     def command(self, tool: str, image: Path, offset: int, sector_size: int) -> list[str]:
-        return [self.executables[tool], "-i", "raw", "-f", "ntfs", "-b", str(sector_size),
+        return [self.executables[tool], "-i", "raw", "-f", identify(image, offset, sector_size), "-b", str(sector_size),
                 "-o", str(offset)]
 
     def _listing(self, image: Path, offset: int, sector_size: int, *, directories=False,
@@ -218,21 +223,36 @@ class Tsk:
         return text
 
     def scan(self, image: Path, offset: int, sector_size: int) -> tuple[list[dict], list[str]]:
+        filesystem = identify(image, offset, sector_size)
         progress("scan", message="查找已删除的文件记录")
-        candidates, warnings = parse_body(self._listing(image, offset, sector_size))
-        queue = self._directories(self._listing(image, offset, sector_size, directories=True))
-        visited = set()
+        saved = partial()
+        if saved is None:
+            candidates, warnings = parse_body(self._listing(image, offset, sector_size), filesystem)
+            queue = self._directories(self._listing(image, offset, sector_size, directories=True))
+            visited = set()
+        else:
+            candidates, warnings, queue = saved["candidates"], saved["warnings"], saved["queue"]
+            visited = set(saved["visited"])
+            if (not isinstance(candidates, list) or len(candidates) > 100000 or len(visited) > 2000
+                    or not isinstance(queue, list) or len(queue) > 100000
+                    or any(not isinstance(i, str) or not re.fullmatch(r"[0-9]+", i) for i in visited)
+                    or any(not isinstance(p, list) or len(p) != 2 or not isinstance(p[0], str)
+                           or not re.fullmatch(r"[0-9]+", p[0]) or not isinstance(p[1], str) for p in queue)):
+                raise RecoveryError("Invalid directory traversal checkpoint.")
+        def save():
+            save_partial(dict(candidates=candidates, warnings=warnings, queue=queue, visited=sorted(visited)))
+        save()
         known = {(item["inode"], item["observed_path"]) for item in candidates}
         while queue and len(visited) < 2000:
             checkpoint()
-            inode, path = queue.pop(0)
+            inode, path = queue[0]
             if inode in visited:
+                queue.pop(0)
                 continue
-            visited.add(inode)
             progress("directories", len(visited), 0, path)
             try:
                 listing = self._listing(image, offset, sector_size, inode=inode, prefix=path.rstrip("/") + "/")
-                children, notices = parse_body(listing)
+                children, notices = parse_body(listing, filesystem)
                 warnings.extend(notices)
                 for item in children:
                     key = item["inode"], item["observed_path"]
@@ -245,6 +265,9 @@ class Tsk:
                     return candidates, warnings + ["Candidate limit reached during directory traversal."]
             except RecoveryError as exc:
                 warnings.append(f"Deleted directory {inode} could not be fully traversed: {exc}")
+            visited.add(inode)
+            queue.pop(0)
+            save()
         if queue:
             warnings.append("Deleted directory traversal reached its 2,000-record limit; some paths remain unvisited.")
         return candidates, warnings
@@ -270,8 +293,10 @@ class Tsk:
 
     def extract(self, image: Path, offset: int, sector_size: int, inode: str,
                 output, limit: int) -> None:
-        if not ATTRIBUTE_ID.fullmatch(inode):
-            raise RecoveryError("Invalid or unsupported NTFS data attribute identifier.")
+        filesystem = identify(image, offset, sector_size)
+        valid = ATTRIBUTE_ID.fullmatch(inode) if filesystem == "ntfs" else re.fullmatch(r"[0-9]+", inode)
+        if not valid:
+            raise RecoveryError("Invalid or unsupported filesystem record identifier.")
         command = self.command("icat", image, offset, sector_size)
         command += ["-r", str(image), inode]
         run_bounded(command, output, limit=limit, timeout=self.timeout)

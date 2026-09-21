@@ -17,6 +17,7 @@ class TskEncodingTests(unittest.TestCase):
             output.write(raw)
 
         with patch("recovery_core.tsk.run_bounded", side_effect=output_bytes), \
+                patch("recovery_core.tsk.identify", return_value="ntfs"), \
                 patch("recovery_core.tsk._output_encoding", return_value=encoding):
             return backend._listing(Path("fixture.img"), 0, 512)
 

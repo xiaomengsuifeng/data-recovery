@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "target": "Windows 11 x64",
-  "version": "0.2.1rc1",
+  "version": "0.3.0rc1",
   "archives": [
     {
       "filename": "python-3.13.12-embed-amd64.zip",

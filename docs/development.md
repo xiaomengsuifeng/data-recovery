@@ -1,6 +1,6 @@
-# 拾回 0.2.1rc1 开发说明
+# 拾回 0.3.0rc1 开发说明
 
-核心支持 NTFS 镜像及 Windows NTFS 卷，桌面采用 PySide6 / Qt Widgets，读取由独立 TSK 4.15.0 CLI 提供。核心 Python 代码无第三方运行依赖；桌面增加 PySide6-Essentials。自己的代码采用 MIT，第三方组件单独按其许可使用，见[第三方声明](../THIRD_PARTY_NOTICES.md)。
+核心支持 NTFS / 标准 exFAT 镜像及 Windows 卷，桌面采用 PySide6 / Qt Widgets，元数据读取由独立 TSK 4.15.0 CLI 提供。JPEG 解析、只读采集和进度记录使用 Python 标准库，无新增核心依赖；桌面增加 PySide6-Essentials。自己的代码采用 MIT，第三方组件单独按其许可使用，见[第三方声明](../THIRD_PARTY_NOTICES.md)。
 
 ## 本机桌面开发
 
@@ -37,13 +37,32 @@ python3 -B -m recovery_core verify /path/to/recovered-01 --manifest /path/to/tar
 python3 -B -m recovery_core validate-fixture /path/to/ntfs-fixture-ID --output /path/to/validated-01 --tsk-bin /path/to/tsk/bin
 ```
 
-偏移必须替换为实际 NTFS 起始扇区，分区镜像通常为 0。扇区大小默认 512，可使用 `--sector-size`。桌面自动读取布局。每次扫描、导出需要新目录且父目录已存在，防止覆盖已有结果。
+偏移必须替换为实际文件系统起始扇区，分区镜像通常为 0。扇区大小默认 512，可使用 `--sector-size`。桌面自动读取布局。新建扫描、采集、导出需要新目录且父目录已存在；续接只接受本程序生成的进度目录。
 
 `recover --id <候选ID>` 可以重复，限定目标。CLI 默认单文件上限 1 GiB，可用 `--max-file-bytes` 改变；桌面不采用该默认上限，没有收费额度。实际导出受空间、源文件状态及目标文件系统约束。
 
-`scan --deep-png` 额外扫描所选 NTFS 分区的未分配空间，`validate-fixture --deep-png` 在各阶段使用同一选项。默认仍只扫描删除记录。核心 `carving.py` 根据当前 `$Bitmap` 找到连续未分配范围，只以镜像中的 PNG 签名、块长度、关键块顺序、IHDR 字段、CRC 和 IEND 判断内容边界；不读取原件清单，也不推断原名。该模式暂不接受实时卷。
+`scan --deep-png` 额外扫描所选 NTFS / exFAT 分区的未分配空间，`validate-fixture --deep-png` 在各阶段使用同一选项。默认仍只扫描删除记录。核心 `carving.py` 根据 NTFS `$Bitmap` 或 exFAT 分配位图找到连续未分配范围，只以 PNG 签名、块长度、关键块顺序、IHDR 字段、CRC 和 IEND 判断边界；不读取原件清单或推断原名。内容深度扫描不接受实时卷。
 
-`validate-fixture` 接收 `New-RecoveryFixture.ps1` 生成的完整目录，先核对删除前原件副本和四个阶段（可追加写入后的第五阶段）的镜像/清单，再逐阶段调用扫描、导出和原件验证。输出必须在样本目录之外；几何参数自动读取并核对。它要求目标内容及路径全部匹配才退出 0，生成器运行成功不等于验收通过。[Windows 自动生成与验收方法](windows-testing.md)
+`validate-fixture` 接收 `New-RecoveryFixture.ps1` 生成的完整目录，先核对删除前原件和阶段镜像/清单，再逐阶段扫描、导出、验证。NTFS 为四阶段，可附加第五个写入阶段；exFAT 为删除前、直接删除后两阶段。输出在样本目录之外，几何参数自动核对；内容及路径全部匹配才退出 0。[Windows 自动生成与验收方法](windows-testing.md)
+
+## 扩展功能 CLI 与进度格式
+
+```powershell
+.\.venv\Scripts\python.exe -B -m recovery_core scan D:\fixtures\disk.img --offset 128 --deep-jpeg --reassemble-jpeg --output D:\results\scan-new --tsk-bin D:\Tools\tsk\bin
+.\.venv\Scripts\python.exe -B -m recovery_core resume-scan D:\results\scan-new --tsk-bin D:\Tools\tsk\bin
+.\.venv\Scripts\python.exe -B -m recovery_core acquire --file D:\fixtures\disk.img --output D:\results\image-new --retries 1 --timeout 30
+.\.venv\Scripts\python.exe -B -m recovery_core resume-acquire D:\results\image-new
+```
+
+设备采集可将 `--file` 换成 `--volume E:` 或 `--disk <核对过的磁盘编号>`，需要管理员权限以及另一物理盘上的程序和目标。单次读取由隐藏子进程以 `rb` 执行；超时、取消会结束并回收子进程。先完成大块正常读取，再按 64 KiB / 4 KiB / 逻辑扇区缩小失败范围，额外重试 0–10 次。`--block-bytes` 默认为 16 MiB，上限 64 MiB，必须扇区对齐。
+
+`acquisition.json` 的 `ranges` 连续覆盖源大小，状态为 `good / bad / pending`；good 区域保存 SHA-256，最终 bad 区域用零占位。文件写入并 fsync 后，才原子发布进度；重启会核对源身份、目标 inode/尺寸及 good 区域摘要。文件源核对路径、inode、设备、大小及 mtime；设备源核对磁盘身份和布局，不证明活动源内容未变。目录锁防止并发续采。范围记录最多 200,000 项，JSON 最多 64 MiB。采集退出码：完整 0、含坏区 1、失败 2、取消 130。
+
+`scan-progress.json` 记录软件/TSK 版本、完整镜像摘要、选项及各阶段状态。元数据保存已访问目录与剩余队列；PNG/JPEG 每个扫描块保存游标、候选及资源预算；已完成阶段直接复用。重启需要版本、源路径和 SHA-256 一致。NTFS 日志按阶段重新执行，实时卷不续扫。写入临时文件后原子替换，失败保留之前进度；最终 `session.json` 不覆盖。
+
+`jpeg.py` 校验 SOI/EOI、量化表、Huffman 表、扫描头、尺寸和采样；基线顺序 DCT 消耗精确数量的块与熵数据，并检查填充和重启标记。渐进式仅检查标记、表与扫描顺序，标为 `progressive_markers`。连续 JPEG 上限 64 MiB / 4000 万像素；基线重组上限 8 MiB，最多 32 个物理顺序空闲段，或前 8 个头部簇边界与 ±4 MiB 内最近的 128 个空闲尾部簇。多个有效不同内容则跳过，达到搜索边界会记录。所有重组候选仍为待核对，最多 100,000 次签名尝试，额外读取预算为 max(16 MiB, 分区完整簇空间的两倍)。
+
+JPEG 候选使用 `jpeg_carving`，保留字节区间、内容摘要、检查层级、重组标志，原名/目录为空。预览与导出重新核对全部区间未分配、结构及摘要；不把结构有效当成独立原件验证。exFAT 使用数字记录编号及 `exfat_metadata`，几何校验包括启动区 checksum、FAT/堆边界和分配位图；双 FAT TexFAT 明确拒绝。
 
 ## 报告与路径
 
@@ -85,7 +104,7 @@ TSK stdout 按预算读取、stderr 最多 1 MiB，同时排空两条管道；�
 
 PNG 以 1 MiB 块搜索、64 KiB 块校验，支持跨读取块边界的签名，但不跨已分配簇拼接。位图上限 64 MiB、单 PNG 上限 256 MiB、块数及签名尝试分别最多 100,000；重复签名解析的总读取预算为分区完整簇字节数的两倍。达到扫描上限报错，不写已完成会话。结构解析不展开图像压缩数据；实际解码由有内存和像素上限的 Qt 预览单独执行。
 
-预览最多读取 32 MiB；Office ZIP 的 XML 每项不超过 2 MiB，最多 12 项，拒绝实体声明。图片限制解码内存与像素数。导出前检查可用空间，实际写入失败按逐文件异常保留结果。取消导出、哈希或最终来源核对时保留报告，重试使用新目录；尚无断点续扫。
+预览最多读取 32 MiB；Office ZIP 的 XML 每项不超过 2 MiB，最多 12 项，拒绝实体声明。图片限制解码内存与像素数。导出前检查可用空间，实际写入失败按逐文件异常保留结果。取消导出时保留报告，重新导出使用新目录；镜像扫描及采集可使用上述进度续接。
 
 ## 可复现验证
 
@@ -95,7 +114,7 @@ PYTHONPATH=src QT_QPA_PLATFORM=offscreen .venv/bin/python -B -m unittest discove
 QT_QPA_PLATFORM=offscreen .venv/bin/python -B tools/run_desktop_demo.py --output artifacts/desktop-new --tsk-bin /path/to/tsk/bin
 ```
 
-没有桌面依赖时 Qt 测试会跳过，完整验收必须安装 `[desktop]`。当前完整套件为 238 项，包含四阶段验收、Windows 兼容、PNG、旧日志、片段、异常处理及界面回归。管理员全量记录见最新验收报告；自动套件与实际 VHD 删除实验分别保存证据。`run_desktop_demo.py` 操作实际 Qt 窗口和工作线程，输出截图、扫描/恢复/校验报告；离屏渲染适用于开发 CI，不等于 Windows 原生窗口或真实磁盘测试。
+没有桌面依赖时 Qt 测试会跳过，完整验收必须安装 `[desktop]`。当前完整套件为 277 项，包含四阶段验收、Windows 兼容、PNG、旧日志、片段、异常处理及界面回归。管理员全量记录见最新验收报告；自动套件与实际 VHD 删除实验分别保存证据。`run_desktop_demo.py` 操作实际 Qt 窗口和工作线程，输出截图、扫描/恢复/校验报告；离屏渲染适用于开发 CI，不等于 Windows 原生窗口或真实磁盘测试。
 
 `tools/run_desktop_acceptance.py` 对独立原件清单和 NTFS 镜像执行完整原生窗口验收，通过 `--scale 1 / 1.25 / 1.5 / 2` 分别启动不同缩放的 Qt 进程；不改系统设置。它检查窗口范围、按钮可达、文本/图片预览、恢复内容与原路径、会话重开和取消后的状态。便携包带有同一工具，使用 `--installed-runtime` 保证测试包内模块。[执行方法](milestones/10-software-completion.md)
 
@@ -114,7 +133,7 @@ New-Item -ItemType Directory -Force .\artifacts
 
 该入口运行全部单元测试、TSK 启动检查、Windows PowerShell 5.1 语法检查、只读卷枚举，以及 NIST 镜像桌面演示；不创建测试卷或触发 UAC。`--qt-platform windows` 会短暂显示原生窗口，默认 `offscreen`。没有缓存时会下载并校验固定 NIST 样本，解压需要约 1 GiB 空间。输出中的 `tests.json` 逐项记录跳过原因，`validation.json` 汇总步骤结果，`desktop/` 保存截图和恢复证据。失败或超时返回非零退出码，已有输出不会覆盖。
 
-普通用户运行时，符号链接用例可能因权限不足而跳过；最新管理员套件为 238 项，全部通过且无跳过。统一入口中的 `windows_image_workflow_verified` 仅表示镜像流程，`full_windows_acceptance_verified` 保持为 `false`。实际 VHD 实验的组合场景仍为 `incomplete`，不能用自动测试通过覆盖该结果。[最新记录与边界](milestones/10-software-completion.md)
+普通用户运行时，符号链接用例可能因权限不足而跳过；最新管理员套件为 277 项，全部通过且无跳过。统一入口中的 `windows_image_workflow_verified` 仅表示镜像流程，`full_windows_acceptance_verified` 保持为 `false`。实际 VHD 实验的组合场景仍为 `incomplete`，不能用自动测试通过覆盖该结果。[最新记录与边界](milestones/11-extended-software.md)
 
 演示使用 NIST DFR-01 镜像，导出 4,296 字节的 `Bunda.txt`，与文档指定的删除后磁盘区域核对。这不是独立删除前原件，也不是普遍恢复率证据。[样本说明](../tests/integration/fixture-source.md)
 
@@ -129,8 +148,8 @@ New-Item -ItemType Directory -Force .\artifacts
 ```sh
 python3 tools/fetch_windows_runtime.py
 python3 tools/build_windows_bundle.py
-.venv/bin/python tools/audit_windows_pe.py dist/ShiHui-0.2.1rc1-windows-x64 --output artifacts/windows-pe-audit.json
-python3 dist/ShiHui-0.2.1rc1-windows-x64/check_package.py
+.venv/bin/python tools/audit_windows_pe.py dist/ShiHui-0.3.0rc1-windows-x64 --output artifacts/windows-pe-audit.json
+python3 dist/ShiHui-0.3.0rc1-windows-x64/check_package.py
 ```
 
 `tools/runtime-lock.json` 记录版本、来源、长度、SHA-256、选用模块和对应源码。下载器只下载构建依赖，软件恢复过程中不联网。错误归档或 `.incomplete` 文件会保留并报错，检查后移走该文件再重试。
@@ -149,4 +168,4 @@ python3 dist/ShiHui-0.2.1rc1-windows-x64/check_package.py
 
 上一轮本地包 `ShiHui-0.2.0-volume-validation-windows-x64` 包含直接卷验收脚本、Python 辅助工具和重新挂载盘符修复。包内 398 个文件清单及 147 个 PE 检查通过，实际包内 Qt/TSK 完成清空回收站阶段的只读虚拟卷验收。该轮 221 项管理员测试无失败、无跳过。[历史验收及包摘要](milestones/09-live-volume-validation.md)
 
-当前候选包为 `ShiHui-0.2.1rc1-windows-x64`，补齐取消与权限处理、断连/满盘报告、窗口缩放和原生验收工具，并附完整文档。238 项管理员测试全部通过。包内运行时与发布 ZIP 的最终校验另存到验收材料，不修改已生成的包。尚未发布新的 GitHub Release。[本轮交付状态](milestones/10-software-completion.md)
+当前候选包为 `ShiHui-0.3.0rc1-windows-x64`，包含 exFAT、JPEG 内容扫描与有界重组、只读采集及扫描续接。277 项管理员测试全部通过，无失败或跳过。包内运行时与发布 ZIP 的最终校验另存到验收材料，不修改已生成的包。尚未发布新的 GitHub Release。[本轮交付状态](milestones/11-extended-software.md)

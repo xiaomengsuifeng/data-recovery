@@ -73,7 +73,9 @@ def prepare(fixture: Path, output: Path, stage: str):
     plan = {"schema_version": 1, "fixture_id": bundle["fixture_id"], "stage": stage,
             "source_image": selected["source"], "original_vhd": original_vhd,
             "copy": image_identity(clone), "offset_sectors": selected["offset_sectors"],
-            "marker": ".recovery-fixture-" + bundle["fixture_id"], "label": "RECOV_" + bundle["fixture_id"][:12]}
+            "marker": ".recovery-fixture-" + bundle["fixture_id"], "filesystem": bundle["filesystem"],
+            "label": ("RC_" + bundle["fixture_id"][:8] if bundle["filesystem"] == "exFAT"
+                      else "RECOV_" + bundle["fixture_id"][:12])}
     write_json(directory / "reference.manifest.json", selected["reference"])
     write_json(directory / "plan.json", plan)
 
@@ -157,7 +159,7 @@ def run_mounted(directory: Path, tsk_bin: Path):
         if len(choices) != 1:
             raise RecoveryError("Cannot uniquely select the copied fixture in the actual volume list.")
         window.partition.setCurrentIndex(choices[0])
-        for checkbox in (window.deep_png, window.deep_log):
+        for checkbox in (window.deep_png, window.deep_log, window.deep_jpeg, window.reassemble_jpeg):
             if checkbox.isEnabled() or checkbox.isChecked():
                 raise RecoveryError("Image-only scans remained enabled for a live volume.")
         window.grab().save(str(directory / "01-volume-source.png"))
@@ -213,6 +215,53 @@ def run_mounted(directory: Path, tsk_bin: Path):
         window.request_preview()
         wait()
         window.grab().save(str(directory / "04-reopened.png"))
+        # The wrapper has proved this is a new, read-only, file-backed fixture.
+        # Exercise the physical-device desktop path and cancellable volume reads.
+        window.mode.setCurrentIndex(2)
+        wait()
+        disk_choices = [i for i in range(window.partition.count())
+                        if (row := window.partition.itemData(i)) and row["disk_numbers"] == identity["disk_numbers"]
+                        and row["disk_ids"] == identity["disk_ids"]]
+        if len(disk_choices) != 1 or window.scan_button.isEnabled():
+            raise RecoveryError("Cannot uniquely select the synthetic disk for acquisition.")
+        window.partition.setCurrentIndex(disk_choices[0])
+        window.start_acquisition()
+        wait()
+        disk_capture = window.last_acquisition
+        if disk_capture["status"] != "completed" or disk_capture["image_sha256"] != plan["source_image"]["sha256"]:
+            raise RecoveryError("Physical-device acquisition differs from independent frozen image.")
+        window.grab().save(str(directory / "05-disk-acquisition.png"))
+        window.load_acquired()
+        wait()
+        if window.partition.count() != 1:
+            raise RecoveryError("Acquired disk image partition could not be opened.")
+        from recovery_core.acquisition import acquire, resume_acquisition
+        from recovery_core.control import TaskControl, task_scope
+        control = TaskControl()
+        control.progress = lambda event: control.cancelled.set() if event["phase"] == "acquisition" and event["completed"] >= 16 * 1024 * 1024 else None
+        volume_dir = directory / "volume-acquisition"
+        with task_scope(control):
+            paused = acquire(VolumeSource(identity["mount"]), volume_dir)
+        if paused["status"] != "cancelled" or paused["good_bytes"] != 16 * 1024 * 1024:
+            raise RecoveryError("Device acquisition did not preserve the completed range on cancellation.")
+        resumed = resume_acquisition(volume_dir)
+        digest = hashlib.sha256()
+        with raw.open("rb") as stream:
+            stream.seek(plan["offset_sectors"] * 512)
+            remaining = identity["size"]
+            while remaining:
+                data = stream.read(min(1024 * 1024, remaining))
+                if not data:
+                    raise RecoveryError("Reference partition is truncated.")
+                digest.update(data)
+                remaining -= len(data)
+        if resumed["status"] != "completed" or resumed["image_sha256"] != digest.hexdigest():
+            raise RecoveryError("Resumed volume acquisition differs from independent raw partition bytes.")
+        write_json(directory / "device-acquisition.json", {
+            "status": "passed", "scope": "read_only_synthetic_vhd", "physical_media_tested": False,
+            "disk_sha256": disk_capture["image_sha256"], "volume_sha256": resumed["image_sha256"],
+            "volume_bytes": identity["size"], "cancelled_good_bytes": paused["good_bytes"],
+            "disk_desktop_flow": True, "volume_resume": True, "acquired_image_opened": True})
         write_json(directory / "live-volume.json", {
             "schema_version": 1, "status": "passed", "scope": "read_only_synthetic_vhd", "stage": plan["stage"],
             "qt_platform": app.platformName(), "session": str(session), "recovered": str(window.last_output),

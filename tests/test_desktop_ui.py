@@ -238,6 +238,71 @@ class DesktopUITests(unittest.TestCase):
                         self.window.partition, self.window.workspace_button, self.window.scan_button):
             self.assertGreaterEqual(control.height(), control.sizeHint().height())
         self.assertGreater(self.window.home_scroll.verticalScrollBar().maximum(), 0)
+
+    def test_fragmented_jpeg_scan_preview_export_and_reopen(self):
+        from test_carving import BitmapBackend, make_image
+        from test_jpeg import qt_jpeg
+        from recovery_core.common import read_json
+        payload = qt_jpeg()
+        image = make_image(self.root / 'jpeg.img', [(512, payload[:1024]), (2048, payload[1024:])])
+        self.window.backend = lambda: BitmapBackend(b'\x09' + bytes(7))
+        self.window.go_home()
+        self.window.source_edit.setText(str(image))
+        self.window.workspace.setText(str(self.root))
+        self.window.partition.clear()
+        self.window.partition.addItem('Test NTFS', {'offset': 3, 'sector_size': 512})
+        self.window.deep_jpeg.setChecked(True)
+        self.window.reassemble_jpeg.setChecked(True)
+        self.window.start_scan()
+        self.wait_task()
+        self.assertFalse(self.errors)
+        self.assertEqual(self.window.report['jpeg']['reconstructed_count'], 1)
+        self.assertIn('碎片', self.window.model.data(self.window.model.index(0, 5)))
+        self.window.table.setCurrentIndex(self.window.proxy.index(0, 1))
+        self.window.request_preview()
+        self.wait_task()
+        self.assertFalse(self.window.preview_image.pixmap().isNull())
+        self.assertIn('重组', self.window.preview_note.text())
+        self.window.select_visible()
+        self.window.export_to(self.root, sorted(self.window.model.checked))
+        self.wait_task()
+        result = read_json(self.window.last_output / 'recovery.json')['results'][0]
+        self.assertEqual((self.window.last_output / result['saved_path']).read_bytes(), payload)
+        self.window.load_report(self.window.session, read_json(self.window.session / 'session.json'))
+        self.assertEqual(self.window.proxy.rowCount(), 1)
+
+    def test_acquisition_resume_report_and_load_image(self):
+        from recovery_core.acquisition import acquire
+        from recovery_core.control import OperationCancelled
+        image = self.root / 'test.img'
+        data = image.read_bytes()
+        def interrupted(path, offset, size, timeout):
+            if offset:
+                raise OperationCancelled()
+            return data[:size]
+        report = acquire(image, self.root / 'capture', block_bytes=512, reader=interrupted)
+        self.window.show_acquisition(report)
+        self.assertEqual(self.window.pages.currentIndex(), 3)
+        self.assertIn('pending', self.window.acquisition_text.toPlainText())
+        self.window.retry_acquisition()
+        self.wait_task()
+        self.assertFalse(self.errors)
+        self.assertEqual(self.window.last_acquisition['status'], 'completed')
+        self.assertEqual(Path(self.window.last_acquisition['image']).read_bytes(), data)
+        self.window.load_acquired()
+        self.wait_task()
+        self.assertEqual(self.window.mode.currentIndex(), 0)
+        self.assertEqual(self.window.partition.count(), 1)
+
+    def test_exfat_rejects_ntfs_log_before_starting_worker(self):
+        self.window.go_home()
+        self.window.workspace.setText(str(self.root))
+        self.window.partition.clear()
+        self.window.partition.addItem('exFAT', {'filesystem': 'exFAT'})
+        self.window.deep_log.setChecked(True)
+        self.window.start_scan()
+        self.assertIsNone(self.window.worker)
+        self.assertIn('exFAT', self.errors[0])
         self.window.home_scroll.ensureWidgetVisible(self.window.scan_button)
         self.app.processEvents()
         viewport = self.window.home_scroll.viewport()
